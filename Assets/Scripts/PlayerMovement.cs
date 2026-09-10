@@ -179,10 +179,7 @@ public sealed class PlayerMovement : MonoBehaviour
             activeTrailSegmentEnd = destinationPosition;
         }
 
-        movementLine.positionCount = activeTrailPositionIndex + 1;
-        movementLine.SetPosition(
-            activeTrailPositionIndex,
-            GetStableActiveTrailPosition(transform.position));
+        UpdateActiveTrailPosition(transform.position);
     }
 
     private void MoveTowardsDestination()
@@ -191,9 +188,7 @@ public sealed class PlayerMovement : MonoBehaviour
             transform.position,
             destinationPosition,
             movementSpeed * Time.deltaTime);
-        movementLine.SetPosition(
-            activeTrailPositionIndex,
-            GetStableActiveTrailPosition(transform.position));
+        UpdateActiveTrailPosition(transform.position);
 
         if ((transform.position - destinationPosition).sqrMagnitude > 0.000001f)
         {
@@ -317,6 +312,28 @@ public sealed class PlayerMovement : MonoBehaviour
         Vector3 stablePosition = activeTrailSegmentStart
             + segment * Mathf.Clamp01(progress);
         return ToLinePosition(stablePosition);
+    }
+
+    private void UpdateActiveTrailPosition(Vector3 playerPosition)
+    {
+        Vector3 activePosition = GetStableActiveTrailPosition(playerPosition);
+        Vector3 previousPosition = trailPositions[activeTrailPositionIndex - 1];
+        float minimumSegmentLength = Mathf.Max(lineWidth, 0.001f);
+
+        // A live endpoint can briefly overlap the preceding point when a move
+        // starts or when backtracking finishes. LineRenderer cannot form a
+        // stable corner from that zero-length segment, so its mesh spikes.
+        // Keep the segment hidden while it is short enough to sit under the
+        // player, then add it once its direction is well-defined.
+        if ((activePosition - previousPosition).sqrMagnitude
+            <= minimumSegmentLength * minimumSegmentLength)
+        {
+            movementLine.positionCount = activeTrailPositionIndex;
+            return;
+        }
+
+        movementLine.positionCount = activeTrailPositionIndex + 1;
+        movementLine.SetPosition(activeTrailPositionIndex, activePosition);
     }
 
     private void ResolveReferences()
