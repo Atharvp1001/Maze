@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 /// graph. The complete maze and all visible points use only two render meshes.
 /// No physics colliders are required.
 /// </summary>
-public sealed class MazeGenerator : MonoBehaviour
+internal sealed class MazeGenerator : MonoBehaviour
 {
     [Header("Maze Size")]
     [SerializeField, Min(2)] private int columns = 12;
@@ -74,18 +74,18 @@ public sealed class MazeGenerator : MonoBehaviour
     private readonly List<Color32> pointColors = new List<Color32>(512);
     private readonly List<MazeNavigationPoint> navigationPoints = new List<MazeNavigationPoint>(128);
 
-    public int Columns => columns;
-    public int Rows => rows;
-    public float CellSize => cellSize;
-    public int LastGeneratedSeed { get; private set; }
-    public int StartPointIndex { get; private set; } = -1;
-    public int EndPointIndex { get; private set; } = -1;
-    public Vector3 StartWorldPosition => GetCellWorldPosition(0, 0);
-    public Vector3 ExitWorldPosition => GetCellWorldPosition(columns - 1, rows - 1);
-    public IReadOnlyList<MazeNavigationPoint> NavigationPoints => navigationPoints;
+    private int Columns => columns;
+    private int Rows => rows;
+    internal float CellSize => cellSize;
+    private int LastGeneratedSeed { get; set; }
+    internal int StartPointIndex { get; private set; } = -1;
+    internal int EndPointIndex { get; private set; } = -1;
+    private Vector3 StartWorldPosition => GetCellWorldPosition(0, 0);
+    private Vector3 ExitWorldPosition => GetCellWorldPosition(columns - 1, rows - 1);
+    internal IReadOnlyList<MazeNavigationPoint> NavigationPoints => navigationPoints;
 
     /// <summary>Raised after geometry and navigation data are ready.</summary>
-    public event Action<MazeGenerator> MazeGenerated;
+    internal event Action<MazeGenerator> MazeGenerated;
 
     [Flags]
     private enum Wall
@@ -100,11 +100,11 @@ public sealed class MazeGenerator : MonoBehaviour
 
     private readonly struct Neighbour
     {
-        public readonly Vector2Int Position;
-        public readonly Wall Direction;
-        public readonly Wall OppositeDirection;
+        internal readonly Vector2Int Position;
+        internal readonly Wall Direction;
+        internal readonly Wall OppositeDirection;
 
-        public Neighbour(Vector2Int position, Wall direction, Wall oppositeDirection)
+        internal Neighbour(Vector2Int position, Wall direction, Wall oppositeDirection)
         {
             Position = position;
             Direction = direction;
@@ -119,7 +119,7 @@ public sealed class MazeGenerator : MonoBehaviour
 
     /// <summary>Builds a new random or seeded maze using the existing meshes.</summary>
     [ContextMenu("Generate Maze")]
-    public void GenerateMaze()
+    private void GenerateMaze()
     {
         ClampSettings();
         EnsureRenderObjects();
@@ -144,7 +144,7 @@ public sealed class MazeGenerator : MonoBehaviour
     }
 
     /// <summary>Returns a navigation point by index without creating an object.</summary>
-    public MazeNavigationPoint GetNavigationPoint(int pointIndex)
+    internal MazeNavigationPoint GetNavigationPoint(int pointIndex)
     {
         if (pointIndex < 0 || pointIndex >= navigationPoints.Count)
         {
@@ -155,21 +155,21 @@ public sealed class MazeGenerator : MonoBehaviour
     }
 
     /// <summary>Returns the world-space centre of a navigation point.</summary>
-    public Vector3 GetNavigationPointWorldPosition(int pointIndex)
+    internal Vector3 GetNavigationPointWorldPosition(int pointIndex)
     {
         MazeNavigationPoint point = GetNavigationPoint(pointIndex);
         return GetCellWorldPosition(point.Cell.x, point.Cell.y);
     }
 
     /// <summary>Returns the world-space centre of a maze cell.</summary>
-    public Vector3 GetCellWorldPosition(int column, int row)
+    private Vector3 GetCellWorldPosition(int column, int row)
     {
         ValidateCell(column, row);
         return transform.TransformPoint(GetCellLocalPosition(column, row));
     }
 
     /// <summary>Returns an axis-aligned world-space bound around the maze floor.</summary>
-    public Bounds GetWorldBounds()
+    internal Bounds GetWorldBounds()
     {
         float halfWidth = columns * cellSize * 0.5f;
         float halfHeight = rows * cellSize * 0.5f;
@@ -187,7 +187,7 @@ public sealed class MazeGenerator : MonoBehaviour
     /// Finds the closest point that can be reached in one straight, unobstructed
     /// move. Intermediate grid points in a long corridor may be skipped.
     /// </summary>
-    public bool TryGetReachablePoint(
+    internal bool TryGetReachablePoint(
         Vector3 worldPosition,
         int fromPointIndex,
         float maximumWorldDistance,
@@ -226,7 +226,7 @@ public sealed class MazeGenerator : MonoBehaviour
     /// Returns true when two points share a row or column and every grid edge
     /// between them is open.
     /// </summary>
-    public bool CanTravelStraight(int fromPointIndex, int destinationPointIndex)
+    private bool CanTravelStraight(int fromPointIndex, int destinationPointIndex)
     {
         if (fromPointIndex < 0 || fromPointIndex >= navigationPoints.Count
             || destinationPointIndex < 0 || destinationPointIndex >= navigationPoints.Count
@@ -268,7 +268,7 @@ public sealed class MazeGenerator : MonoBehaviour
 
     /// <summary>Clears generated data and meshes while retaining reusable objects.</summary>
     [ContextMenu("Clear Maze")]
-    public void ClearMaze()
+    private void ClearMaze()
     {
         navigationPoints.Clear();
         StartPointIndex = -1;

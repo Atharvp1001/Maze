@@ -548,7 +548,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::MazeZoomController
   mazeGenerator: {fileID: 835156200}
-  dividerLine: {fileID: 0}
+  dividerLine: {fileID: 41624346}
   topOcclusionPanel: {fileID: 1900000011}
   framingPadding: 0.5
   minimumSize: 3.5
@@ -605,8 +605,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 050217e7a07502e46bf6cc539d680311, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::MazeGenerator
-  columns: 12
-  rows: 8
+  columns: 20
+  rows: 20
   cellSize: 1
   wallThickness: 0.2
   useRandomSeed: 1

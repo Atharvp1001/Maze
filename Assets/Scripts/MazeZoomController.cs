@@ -8,7 +8,7 @@ using UnityEngine.InputSystem;
 /// </summary>
 [DisallowMultipleComponent]
 [RequireComponent(typeof(Camera))]
-public sealed class MazeZoomController : MonoBehaviour
+internal sealed class MazeZoomController : MonoBehaviour
 {
     [Header("References")]
     [SerializeField] private MazeGenerator mazeGenerator;
@@ -18,6 +18,7 @@ public sealed class MazeZoomController : MonoBehaviour
     [Header("Framing and Zoom")]
     [SerializeField, Min(0f)] private float framingPadding = 0.5f;
     [SerializeField, Min(0.1f)] private float minimumSize = 3.5f;
+    [Tooltip("Base zoom-out limit. Large mazes increase this automatically.")]
     [SerializeField, Min(0.1f)] private float maximumSize = 10f;
     [Tooltip("Percentage of the current zoom changed by each wheel event.")]
     [SerializeField, Range(0.01f, 0.5f)] private float zoomStepPerScroll = 0.12f;
@@ -38,18 +39,24 @@ public sealed class MazeZoomController : MonoBehaviour
     private Camera controlledCamera;
     private float targetSize;
     private float zoomVelocity;
+    private float effectiveMaximumSize;
     private Vector2 pointerPressPosition;
     private Vector2 previousPointerPosition;
+    private int previousScreenWidth;
+    private int previousScreenHeight;
     private bool isZooming;
     private bool isTrackingPointer;
     private bool subscribedToMaze;
 
-    public bool IsPanning { get; private set; }
-    public bool DidPanOnCurrentRelease { get; private set; }
+    private bool IsPanning { get; set; }
+    internal bool DidPanOnCurrentRelease { get; private set; }
 
     private void Awake()
     {
         controlledCamera = GetComponent<Camera>();
+        effectiveMaximumSize = maximumSize;
+        previousScreenWidth = Screen.width;
+        previousScreenHeight = Screen.height;
         ResolveMazeReference();
 
         if (!controlledCamera.orthographic)
@@ -81,6 +88,11 @@ public sealed class MazeZoomController : MonoBehaviour
         DidPanOnCurrentRelease = false;
         SynchronizeOcclusionPanel();
 
+        if (Screen.width != previousScreenWidth || Screen.height != previousScreenHeight)
+        {
+            FrameMaze();
+        }
+
         Mouse mouse = Mouse.current;
         if (mouse == null)
         {
@@ -102,14 +114,14 @@ public sealed class MazeZoomController : MonoBehaviour
     }
 
     /// <summary>Returns true when a screen point is below the divider line.</summary>
-    public bool IsPointerInsideViewport(Vector2 screenPosition)
+    internal bool IsPointerInsideViewport(Vector2 screenPosition)
     {
         return screenPosition.y <= GetViewportTopScreenY();
     }
 
     /// <summary>Frames the complete maze inside the visible lower viewport.</summary>
     [ContextMenu("Frame Maze")]
-    public void FrameMaze()
+    private void FrameMaze()
     {
         if (mazeGenerator == null || controlledCamera == null)
         {
@@ -124,10 +136,12 @@ public sealed class MazeZoomController : MonoBehaviour
         float requiredHorizontalSize = (mazeBounds.extents.x + framingPadding)
             / Mathf.Max(controlledCamera.aspect, 0.05f);
 
+        float requiredSize = Mathf.Max(requiredVerticalSize, requiredHorizontalSize);
+        effectiveMaximumSize = Mathf.Max(maximumSize, requiredSize);
         controlledCamera.orthographicSize = Mathf.Clamp(
-            Mathf.Max(requiredVerticalSize, requiredHorizontalSize),
+            requiredSize,
             minimumSize,
-            maximumSize);
+            effectiveMaximumSize);
 
         Vector3 cameraPosition = controlledCamera.transform.position;
         cameraPosition.x = mazeBounds.center.x;
@@ -135,10 +149,12 @@ public sealed class MazeZoomController : MonoBehaviour
             + (1f - viewportTop) * controlledCamera.orthographicSize;
         controlledCamera.transform.position = cameraPosition;
         ClampCameraToMaze();
+        previousScreenWidth = Screen.width;
+        previousScreenHeight = Screen.height;
     }
 
     /// <summary>Stops an active zoom without changing the current camera size.</summary>
-    public void StopZoom()
+    private void StopZoom()
     {
         isZooming = false;
         zoomVelocity = 0f;
@@ -165,7 +181,10 @@ public sealed class MazeZoomController : MonoBehaviour
         float zoomMultiplier = scrollAmount > 0f
             ? 1f - zoomStepPerScroll
             : 1f / (1f - zoomStepPerScroll);
-        targetSize = Mathf.Clamp(targetSize * zoomMultiplier, minimumSize, maximumSize);
+        targetSize = Mathf.Clamp(
+            targetSize * zoomMultiplier,
+            minimumSize,
+            effectiveMaximumSize);
         isZooming = true;
     }
 

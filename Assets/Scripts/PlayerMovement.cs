@@ -8,7 +8,7 @@ using UnityEngine.InputSystem;
 /// lies anywhere along the player's current unobstructed row or column.
 /// </summary>
 [DisallowMultipleComponent]
-public sealed class PlayerMovement : MonoBehaviour
+internal sealed class PlayerMovement : MonoBehaviour
 {
     [Header("References")]
     [SerializeField] private MazeGenerator mazeGenerator;
@@ -40,9 +40,9 @@ public sealed class PlayerMovement : MonoBehaviour
     private bool hasReachedEnd;
     private bool subscribedToMaze;
 
-    public int CurrentPointIndex => currentPointIndex;
-    public bool IsMoving => isMoving;
-    public bool HasReachedEnd => hasReachedEnd;
+    private int CurrentPointIndex => currentPointIndex;
+    private bool IsMoving => isMoving;
+    private bool HasReachedEnd => hasReachedEnd;
 
     private void Awake()
     {
@@ -88,7 +88,7 @@ public sealed class PlayerMovement : MonoBehaviour
     }
 
     /// <summary>Places the player on the start point and resets its trail.</summary>
-    public void SpawnAtMazeStart()
+    private void SpawnAtMazeStart()
     {
         if (mazeGenerator == null || mazeGenerator.StartPointIndex < 0)
         {
