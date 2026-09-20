@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using DG.Tweening;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -30,6 +31,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     [SerializeField] private bool showNavigationPoints = true;
     [SerializeField, Range(0.05f, 0.75f)] private float navigationPointSize = 0.15f;
     [SerializeField] private Color navigationPointColor = new Color(0.8431f, 0.4941f, 0.3137f, 1f);
+    [SerializeField, Min(1f)] private float navigationPointPopScale = 2f;
+    [SerializeField, Min(0.02f)] private float navigationPointPopDuration = 0.24f;
 
     [Header("Camera")]
     [SerializeField] private bool fitMainCamera = true;
@@ -65,6 +68,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     private Mesh geometryMesh;
     private Mesh pointMesh;
     private Material runtimeMaterial;
+    private Tween[] pointPopTweens = Array.Empty<Tween>();
+    private float[] pointScales = Array.Empty<float>();
 
     private readonly List<Vector3> geometryVertices = new List<Vector3>(1024);
     private readonly List<int> geometryTriangles = new List<int>(1536);
@@ -159,6 +164,51 @@ internal sealed class MazeGenerator : MonoBehaviour
     {
         MazeNavigationPoint point = GetNavigationPoint(pointIndex);
         return GetCellWorldPosition(point.Cell.x, point.Cell.y);
+    }
+
+    /// <summary>Briefly enlarges one visible navigation point, then restores it.</summary>
+    internal void PopNavigationPoint(int pointIndex)
+    {
+        if (!showNavigationPoints || pointMesh == null
+            || pointIndex < 0 || pointIndex >= pointScales.Length)
+        {
+            return;
+        }
+
+        Tween activeTween = pointPopTweens[pointIndex];
+        if (activeTween != null && activeTween.IsActive())
+        {
+            activeTween.Kill();
+        }
+
+        SetNavigationPointScale(pointIndex, 1f);
+
+        float growDuration = navigationPointPopDuration * 0.4f;
+        float settleDuration = navigationPointPopDuration - growDuration;
+        Sequence sequence = DOTween.Sequence();
+        pointPopTweens[pointIndex] = sequence;
+
+        sequence.Append(DOTween.To(
+                () => pointScales[pointIndex],
+                scale => SetNavigationPointScale(pointIndex, scale),
+                navigationPointPopScale,
+                growDuration)
+            .SetEase(Ease.OutCubic));
+        sequence.Append(DOTween.To(
+                () => pointScales[pointIndex],
+                scale => SetNavigationPointScale(pointIndex, scale),
+                1f,
+                settleDuration)
+            .SetEase(Ease.InOutSine));
+        sequence.SetTarget(this);
+        sequence.OnKill(() =>
+        {
+            if (pointIndex < pointPopTweens.Length
+                && ReferenceEquals(pointPopTweens[pointIndex], sequence))
+            {
+                pointPopTweens[pointIndex] = null;
+            }
+        });
     }
 
     /// <summary>Returns the world-space centre of a maze cell.</summary>
@@ -270,6 +320,7 @@ internal sealed class MazeGenerator : MonoBehaviour
     [ContextMenu("Clear Maze")]
     private void ClearMaze()
     {
+        KillPointPopTweens();
         navigationPoints.Clear();
         StartPointIndex = -1;
         EndPointIndex = -1;
@@ -280,6 +331,8 @@ internal sealed class MazeGenerator : MonoBehaviour
         pointVertices.Clear();
         pointTriangles.Clear();
         pointColors.Clear();
+        pointPopTweens = Array.Empty<Tween>();
+        pointScales = Array.Empty<float>();
 
         if (geometryMesh != null)
         {
@@ -546,9 +599,17 @@ internal sealed class MazeGenerator : MonoBehaviour
 
     private void BuildPointMesh()
     {
+        KillPointPopTweens();
         pointVertices.Clear();
         pointTriangles.Clear();
         pointColors.Clear();
+
+        pointPopTweens = new Tween[navigationPoints.Count];
+        pointScales = new float[navigationPoints.Count];
+        for (int pointIndex = 0; pointIndex < pointScales.Length; pointIndex++)
+        {
+            pointScales[pointIndex] = 1f;
+        }
 
         if (!showNavigationPoints)
         {
@@ -565,6 +626,44 @@ internal sealed class MazeGenerator : MonoBehaviour
 
         ApplyMesh(pointMesh, pointVertices, pointTriangles, pointColors);
         pointRenderer.enabled = pointVertices.Count > 0;
+    }
+
+    private void SetNavigationPointScale(int pointIndex, float scale)
+    {
+        if (pointMesh == null || pointIndex < 0 || pointIndex >= pointScales.Length)
+        {
+            return;
+        }
+
+        pointScales[pointIndex] = scale;
+        Vector2Int cell = navigationPoints[pointIndex].Cell;
+        Vector3 centre = GetCellLocalPosition(cell.x, cell.y);
+        float radius = cellSize * navigationPointSize * 0.5f * scale;
+        int firstPerimeterVertex = pointIndex * (PointCircleSegments + 1) + 1;
+
+        for (int segment = 0; segment < PointCircleSegments; segment++)
+        {
+            float angle = segment * Mathf.PI * 2f / PointCircleSegments;
+            pointVertices[firstPerimeterVertex + segment] = new Vector3(
+                centre.x + Mathf.Cos(angle) * radius,
+                centre.y + Mathf.Sin(angle) * radius,
+                -0.05f);
+        }
+
+        pointMesh.SetVertices(pointVertices);
+        pointMesh.RecalculateBounds();
+    }
+
+    private void KillPointPopTweens()
+    {
+        for (int pointIndex = 0; pointIndex < pointPopTweens.Length; pointIndex++)
+        {
+            Tween tween = pointPopTweens[pointIndex];
+            if (tween != null && tween.IsActive())
+            {
+                tween.Kill();
+            }
+        }
     }
 
     private void AddSolidPoint(Vector3 centre)
@@ -851,6 +950,8 @@ internal sealed class MazeGenerator : MonoBehaviour
         cellSize = Mathf.Max(0.1f, cellSize);
         wallThickness = Mathf.Clamp(wallThickness, 0.02f, cellSize * 0.5f);
         navigationPointSize = Mathf.Clamp(navigationPointSize, 0.05f, 0.75f);
+        navigationPointPopScale = Mathf.Max(1f, navigationPointPopScale);
+        navigationPointPopDuration = Mathf.Max(0.02f, navigationPointPopDuration);
         cameraPadding = Mathf.Max(0f, cameraPadding);
     }
 
@@ -874,6 +975,7 @@ internal sealed class MazeGenerator : MonoBehaviour
 
     private void OnDestroy()
     {
+        KillPointPopTweens();
         DestroyRuntimeObject(geometryMesh);
         DestroyRuntimeObject(pointMesh);
         DestroyRuntimeObject(runtimeMaterial);

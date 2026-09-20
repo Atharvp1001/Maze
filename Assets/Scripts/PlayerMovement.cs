@@ -18,10 +18,12 @@ internal sealed class PlayerMovement : MonoBehaviour
     [Header("Movement")]
     [SerializeField, Min(0.1f)] private float movementSpeed = 4f;
     [SerializeField, Range(0.1f, 0.5f)] private float selectionRadiusInCells = 0.38f;
+    [SerializeField, Range(0.05f, 0.75f)] private float pointPopDepartureDistanceInCells = 0.35f;
 
     [Header("Movement Line")]
     [SerializeField, Min(0.01f)] private float lineWidth = 0.08f;
     [SerializeField] private Color lineColor = new Color(0.8431f, 0.4941f, 0.3137f, 1f);
+    [SerializeField, Range(0, 16)] private int lineCornerVertices = 8;
 
     private readonly List<int> trailPointIndices = new List<int>(128);
     private readonly List<Vector3> trailPositions = new List<Vector3>(128);
@@ -33,8 +35,12 @@ internal sealed class PlayerMovement : MonoBehaviour
     private int activeTrailPositionIndex = -1;
     private int backtrackTargetTrailIndex = -1;
     private Vector3 destinationPosition;
+    private Vector3 movementOriginPosition;
     private Vector3 activeTrailSegmentStart;
     private Vector3 activeTrailSegmentEnd;
+    private Vector2Int movementCellDirection;
+    private int movementCellCount;
+    private int nextPointPopStep;
     private bool isMoving;
     private bool isBacktracking;
     private bool hasReachedEnd;
@@ -100,6 +106,8 @@ internal sealed class PlayerMovement : MonoBehaviour
         destinationPointIndex = -1;
         activeTrailPositionIndex = -1;
         backtrackTargetTrailIndex = -1;
+        movementCellCount = 0;
+        nextPointPopStep = 0;
         isMoving = false;
         isBacktracking = false;
         hasReachedEnd = false;
@@ -160,6 +168,17 @@ internal sealed class PlayerMovement : MonoBehaviour
         destinationPointIndex = pointIndex;
         destinationPosition = mazeGenerator.GetNavigationPointWorldPosition(pointIndex);
         destinationPosition.z = transform.position.z;
+        movementOriginPosition = transform.position;
+
+        MazeNavigationPoint startPoint = mazeGenerator.GetNavigationPoint(movementStartPointIndex);
+        MazeNavigationPoint endPoint = mazeGenerator.GetNavigationPoint(destinationPointIndex);
+        Vector2Int cellDelta = endPoint.Cell - startPoint.Cell;
+        movementCellDirection = new Vector2Int(
+            cellDelta.x == 0 ? 0 : (cellDelta.x > 0 ? 1 : -1),
+            cellDelta.y == 0 ? 0 : (cellDelta.y > 0 ? 1 : -1));
+        movementCellCount = Mathf.Abs(cellDelta.x) + Mathf.Abs(cellDelta.y);
+        nextPointPopStep = 0;
+
         backtrackTargetTrailIndex = FindTrailPointIndex(pointIndex);
         isBacktracking = backtrackTargetTrailIndex >= 0;
         isMoving = true;
@@ -189,6 +208,7 @@ internal sealed class PlayerMovement : MonoBehaviour
             destinationPosition,
             movementSpeed * Time.deltaTime);
         UpdateActiveTrailPosition(transform.position);
+        PopDepartedNavigationPoints();
 
         if ((transform.position - destinationPosition).sqrMagnitude > 0.000001f)
         {
@@ -212,6 +232,8 @@ internal sealed class PlayerMovement : MonoBehaviour
         destinationPointIndex = -1;
         activeTrailPositionIndex = -1;
         backtrackTargetTrailIndex = -1;
+        movementCellCount = 0;
+        nextPointPopStep = 0;
         isMoving = false;
         isBacktracking = false;
     }
@@ -282,7 +304,7 @@ internal sealed class PlayerMovement : MonoBehaviour
     private int GetPointIndexAtCell(Vector2Int targetCell)
     {
         // A generated maze has one lightweight navigation point per grid cell.
-        // Looking through this small array happens only when a move completes.
+        // Straight moves only visit a small number of these points at a time.
         IReadOnlyList<MazeNavigationPoint> points = mazeGenerator.NavigationPoints;
         for (int pointIndex = 0; pointIndex < points.Count; pointIndex++)
         {
@@ -293,6 +315,43 @@ internal sealed class PlayerMovement : MonoBehaviour
         }
 
         return -1;
+    }
+
+    private void PopDepartedNavigationPoints()
+    {
+        // The destination stays at its normal size while the player rests on it.
+        // It becomes step zero, and pops, only when the following move leaves it.
+        if (movementCellCount <= 0 || nextPointPopStep >= movementCellCount)
+        {
+            return;
+        }
+
+        Vector3 movement = destinationPosition - movementOriginPosition;
+        float movementLengthSquared = movement.sqrMagnitude;
+        float progress = movementLengthSquared <= 0.000001f
+            ? 1f
+            : Mathf.Clamp01(Vector3.Dot(
+                transform.position - movementOriginPosition,
+                movement) / movementLengthSquared);
+        float departedCellDistance = progress * movementCellCount
+            - pointPopDepartureDistanceInCells;
+        int lastDepartedStep = Mathf.Min(
+            movementCellCount - 1,
+            Mathf.FloorToInt(departedCellDistance + 0.0001f));
+        MazeNavigationPoint startPoint = mazeGenerator.GetNavigationPoint(movementStartPointIndex);
+
+        while (nextPointPopStep <= lastDepartedStep)
+        {
+            Vector2Int reachedCell = startPoint.Cell
+                + movementCellDirection * nextPointPopStep;
+            int pointIndex = GetPointIndexAtCell(reachedCell);
+            if (pointIndex >= 0)
+            {
+                mazeGenerator.PopNavigationPoint(pointIndex);
+            }
+
+            nextPointPopStep++;
+        }
     }
 
     private Vector3 GetStableActiveTrailPosition(Vector3 playerPosition)
@@ -381,7 +440,7 @@ internal sealed class PlayerMovement : MonoBehaviour
         movementLine.startColor = lineColor;
         movementLine.endColor = lineColor;
         movementLine.numCapVertices = 8;
-        movementLine.numCornerVertices = 0;
+        movementLine.numCornerVertices = lineCornerVertices;
         movementLine.alignment = LineAlignment.TransformZ;
         movementLine.textureMode = LineTextureMode.Stretch;
         movementLine.sortingOrder = 1;
@@ -429,7 +488,12 @@ internal sealed class PlayerMovement : MonoBehaviour
     {
         movementSpeed = Mathf.Max(0.1f, movementSpeed);
         selectionRadiusInCells = Mathf.Clamp(selectionRadiusInCells, 0.1f, 0.5f);
+        pointPopDepartureDistanceInCells = Mathf.Clamp(
+            pointPopDepartureDistanceInCells,
+            0.05f,
+            0.75f);
         lineWidth = Mathf.Max(0.01f, lineWidth);
+        lineCornerVertices = Mathf.Clamp(lineCornerVertices, 0, 16);
 
         if (movementLine != null)
         {
@@ -437,6 +501,7 @@ internal sealed class PlayerMovement : MonoBehaviour
             movementLine.endWidth = lineWidth;
             movementLine.startColor = lineColor;
             movementLine.endColor = lineColor;
+            movementLine.numCornerVertices = lineCornerVertices;
         }
     }
 
