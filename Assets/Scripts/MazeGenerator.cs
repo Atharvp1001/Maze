@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using DG.Tweening;
+using TMPro;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -11,6 +12,13 @@ using UnityEngine.Rendering;
 /// </summary>
 internal sealed class MazeGenerator : MonoBehaviour
 {
+    private enum MazeDifficulty
+    {
+        Easy,
+        Medium,
+        Hard
+    }
+
     [Header("Maze Size")]
     [SerializeField, Min(2)] private int columns = 12;
     [SerializeField, Min(2)] private int rows = 8;
@@ -21,11 +29,13 @@ internal sealed class MazeGenerator : MonoBehaviour
     [Tooltip("Turn this off and enter a seed to reproduce the same maze.")]
     [SerializeField] private bool useRandomSeed = true;
     [SerializeField] private int seed = 12345;
+    [SerializeField] private TMP_Text difficultyText;
 
     [Header("Appearance")]
     [SerializeField] private Color floorColor = new Color(0.9333f, 0.9059f, 0.8627f, 1f);
     [SerializeField] private Color wallColor = new Color(0.1451f, 0.149f, 0.1412f, 1f);
     [SerializeField] private bool createEntranceAndExit = true;
+    [SerializeField] private Transform endpointVisual;
 
     [Header("Navigation Points")]
     [SerializeField] private bool showNavigationPoints = true;
@@ -45,6 +55,9 @@ internal sealed class MazeGenerator : MonoBehaviour
     private const string PointObjectName = "Navigation Point Display";
     private const int PointCircleSegments = 20;
     private const int WallCapSegments = 20;
+    private const float EasyNewestCellChance = 0.8f;
+    private const float MediumNewestCellChance = 0.5f;
+    private const float HardNewestCellChance = 0.2f;
 
     private static readonly Vector2Int[] CardinalDirections =
     {
@@ -57,7 +70,7 @@ internal sealed class MazeGenerator : MonoBehaviour
     private Wall[,] walls;
     private bool[,] visited;
     private int[,] pointIndexByCell;
-    private Vector2Int[] pathStack;
+    private Vector2Int[] activeCells;
     private readonly Neighbour[] neighbourBuffer = new Neighbour[4];
 
     private Transform generatedRoot;
@@ -82,7 +95,9 @@ internal sealed class MazeGenerator : MonoBehaviour
     private int Columns => columns;
     private int Rows => rows;
     internal float CellSize => cellSize;
-    private int LastGeneratedSeed { get; set; }
+    private int currentLevelSeed;
+    private MazeDifficulty currentDifficulty;
+    private bool hasCurrentLevel;
     internal int StartPointIndex { get; private set; } = -1;
     internal int EndPointIndex { get; private set; } = -1;
     private Vector3 StartWorldPosition => GetCellWorldPosition(0, 0);
@@ -117,27 +132,56 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
     }
 
-    private void Start()
+    private void Awake()
     {
-        GenerateMaze();
+        if (endpointVisual != null)
+        {
+            endpointVisual.gameObject.SetActive(false);
+        }
     }
 
-    /// <summary>Builds a new random or seeded maze using the existing meshes.</summary>
-    [ContextMenu("Generate Maze")]
-    private void GenerateMaze()
+    private void Start()
+    {
+        GenerateNewLevel();
+    }
+
+    /// <summary>Chooses a fresh difficulty and seed, then builds a new maze.</summary>
+    [ContextMenu("Generate New Level")]
+    public void GenerateNewLevel()
+    {
+        currentLevelSeed = useRandomSeed ? CreateRandomSeed() : seed;
+        currentDifficulty = (MazeDifficulty)new System.Random(currentLevelSeed).Next(3);
+        hasCurrentLevel = true;
+        GenerateCurrentLevel();
+    }
+
+    /// <summary>Rebuilds the current maze without changing its difficulty or seed.</summary>
+    [ContextMenu("Restart Current Level")]
+    public void RestartCurrentLevel()
+    {
+        if (!hasCurrentLevel)
+        {
+            GenerateNewLevel();
+            return;
+        }
+
+        GenerateCurrentLevel();
+    }
+
+    private void GenerateCurrentLevel()
     {
         ClampSettings();
         EnsureRenderObjects();
         ClearMaze();
         EnsureGenerationBuffers();
+        UpdateDifficultyText();
 
-        LastGeneratedSeed = useRandomSeed
-            ? unchecked(Environment.TickCount * 397 ^ Guid.NewGuid().GetHashCode())
-            : seed;
-
-        CarvePassages(new System.Random(LastGeneratedSeed));
+        CarvePassages(
+            new System.Random(currentLevelSeed),
+            GetNewestCellChance(currentDifficulty));
         BuildMazeMesh();
         BuildNavigationData();
+        PositionEndpointVisual();
         BuildPointMesh();
 
         if (fitMainCamera)
@@ -146,6 +190,34 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
 
         MazeGenerated?.Invoke(this);
+    }
+
+    private static int CreateRandomSeed()
+    {
+        return unchecked(Environment.TickCount * 397 ^ Guid.NewGuid().GetHashCode());
+    }
+
+    private static float GetNewestCellChance(MazeDifficulty difficulty)
+    {
+        switch (difficulty)
+        {
+            case MazeDifficulty.Easy:
+                return EasyNewestCellChance;
+            case MazeDifficulty.Medium:
+                return MediumNewestCellChance;
+            case MazeDifficulty.Hard:
+                return HardNewestCellChance;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(difficulty));
+        }
+    }
+
+    private void UpdateDifficultyText()
+    {
+        if (difficultyText != null)
+        {
+            difficultyText.text = currentDifficulty.ToString().ToUpperInvariant();
+        }
     }
 
     /// <summary>Returns a navigation point by index without creating an object.</summary>
@@ -325,6 +397,11 @@ internal sealed class MazeGenerator : MonoBehaviour
         StartPointIndex = -1;
         EndPointIndex = -1;
 
+        if (endpointVisual != null)
+        {
+            endpointVisual.gameObject.SetActive(false);
+        }
+
         geometryVertices.Clear();
         geometryTriangles.Clear();
         geometryColors.Clear();
@@ -350,6 +427,19 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
     }
 
+    private void PositionEndpointVisual()
+    {
+        if (endpointVisual == null || EndPointIndex < 0)
+        {
+            return;
+        }
+
+        Vector3 endpointPosition = GetNavigationPointWorldPosition(EndPointIndex);
+        endpointPosition.z = endpointVisual.position.z;
+        endpointVisual.position = endpointPosition;
+        endpointVisual.gameObject.SetActive(true);
+    }
+
     private void EnsureGenerationBuffers()
     {
         if (walls == null || walls.GetLength(0) != columns || walls.GetLength(1) != rows)
@@ -357,11 +447,11 @@ internal sealed class MazeGenerator : MonoBehaviour
             walls = new Wall[columns, rows];
             visited = new bool[columns, rows];
             pointIndexByCell = new int[columns, rows];
-            pathStack = new Vector2Int[columns * rows];
+            activeCells = new Vector2Int[columns * rows];
         }
     }
 
-    private void CarvePassages(System.Random random)
+    private void CarvePassages(System.Random random, float newestCellChance)
     {
         for (int x = 0; x < columns; x++)
         {
@@ -372,18 +462,21 @@ internal sealed class MazeGenerator : MonoBehaviour
             }
         }
 
-        int stackIndex = 0;
-        pathStack[0] = Vector2Int.zero;
+        int activeCellCount = 1;
+        activeCells[0] = Vector2Int.zero;
         visited[0, 0] = true;
 
-        while (stackIndex >= 0)
+        while (activeCellCount > 0)
         {
-            Vector2Int current = pathStack[stackIndex];
+            int activeCellIndex = random.NextDouble() < newestCellChance
+                ? activeCellCount - 1
+                : random.Next(activeCellCount);
+            Vector2Int current = activeCells[activeCellIndex];
             int choiceCount = GetUnvisitedNeighbours(current);
 
             if (choiceCount == 0)
             {
-                stackIndex--;
+                RemoveActiveCell(activeCellIndex, ref activeCellCount);
                 continue;
             }
 
@@ -391,8 +484,18 @@ internal sealed class MazeGenerator : MonoBehaviour
             walls[current.x, current.y] &= ~next.Direction;
             walls[next.Position.x, next.Position.y] &= ~next.OppositeDirection;
             visited[next.Position.x, next.Position.y] = true;
-            pathStack[++stackIndex] = next.Position;
+            activeCells[activeCellCount++] = next.Position;
         }
+    }
+
+    private void RemoveActiveCell(int activeCellIndex, ref int activeCellCount)
+    {
+        for (int index = activeCellIndex; index < activeCellCount - 1; index++)
+        {
+            activeCells[index] = activeCells[index + 1];
+        }
+
+        activeCellCount--;
     }
 
     private int GetUnvisitedNeighbours(Vector2Int cell)
