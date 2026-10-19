@@ -12,7 +12,7 @@ using UnityEngine.Rendering;
 /// </summary>
 internal sealed class MazeGenerator : MonoBehaviour
 {
-    private enum MazeDifficulty
+    internal enum MazeDifficulty
     {
         Easy,
         Medium,
@@ -41,6 +41,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     [SerializeField] private bool showNavigationPoints = true;
     [SerializeField, Range(0.05f, 0.75f)] private float navigationPointSize = 0.15f;
     [SerializeField] private Color navigationPointColor = new Color(0.8431f, 0.4941f, 0.3137f, 1f);
+    [SerializeField, Min(1f)] private float navigationPointHoverScale = 1.5f;
+    [SerializeField, Min(0.02f)] private float navigationPointHoverDuration = 0.1f;
     [SerializeField, Min(1f)] private float navigationPointPopScale = 2f;
     [SerializeField, Min(0.02f)] private float navigationPointPopDuration = 0.24f;
 
@@ -53,12 +55,12 @@ internal sealed class MazeGenerator : MonoBehaviour
     private const string GeneratedRootName = "Generated Maze";
     private const string GeometryObjectName = "Maze Geometry";
     private const string PointObjectName = "Navigation Point Display";
+    private const string ShiftOpenWarningName = "Shift Opening Warning";
+    private const string ShiftCloseWarningName = "Shift Closing Warning";
     private const int PointCircleSegments = 20;
     private const int WallCapSegments = 20;
-    private const float EasyNewestCellChance = 0.8f;
-    private const float MediumNewestCellChance = 0.5f;
-    private const float HardNewestCellChance = 0.2f;
-
+    private const float MediumExtraPassageRatio = 0.025f;
+    private const float HardExtraPassageRatio = 0.05f;
     private static readonly Vector2Int[] CardinalDirections =
     {
         Vector2Int.up,
@@ -78,6 +80,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     private MeshRenderer geometryRenderer;
     private MeshFilter pointFilter;
     private MeshRenderer pointRenderer;
+    private LineRenderer shiftOpenWarning;
+    private LineRenderer shiftCloseWarning;
     private Mesh geometryMesh;
     private Mesh pointMesh;
     private Material runtimeMaterial;
@@ -91,6 +95,9 @@ internal sealed class MazeGenerator : MonoBehaviour
     private readonly List<int> pointTriangles = new List<int>(768);
     private readonly List<Color32> pointColors = new List<Color32>(512);
     private readonly List<MazeNavigationPoint> navigationPoints = new List<MazeNavigationPoint>(128);
+    private readonly List<LoopCandidate> loopCandidates = new List<LoopCandidate>(256);
+    private readonly List<LoopCandidate> shiftOpenEdges = new List<LoopCandidate>(256);
+    private readonly List<LoopCandidate> shiftClosedEdges = new List<LoopCandidate>(256);
 
     private int Columns => columns;
     private int Rows => rows;
@@ -98,14 +105,142 @@ internal sealed class MazeGenerator : MonoBehaviour
     private int currentLevelSeed;
     private MazeDifficulty currentDifficulty;
     private bool hasCurrentLevel;
+    private bool hasPreparedShift;
+    private bool preparedPassageIsOpen;
+    private LoopCandidate preparedEdgeToOpen;
+    private LoopCandidate preparedEdgeToClose;
     internal int StartPointIndex { get; private set; } = -1;
     internal int EndPointIndex { get; private set; } = -1;
     private Vector3 StartWorldPosition => GetCellWorldPosition(0, 0);
     private Vector3 ExitWorldPosition => GetCellWorldPosition(columns - 1, rows - 1);
     internal IReadOnlyList<MazeNavigationPoint> NavigationPoints => navigationPoints;
 
+    internal void SetDimensions(int newColumns, int newRows)
+    {
+        columns = Mathf.Max(2, newColumns);
+        rows = Mathf.Max(2, newRows);
+    }
+
+    /// <summary>
+    /// Selects one local wall exchange without changing the maze yet.
+    /// The player's trail and nearby cells are excluded.
+    /// </summary>
+    internal bool PrepareWallShift(
+        Vector2Int playerCell,
+        IReadOnlyList<Vector2Int> protectedTrail,
+        int safeRadius)
+    {
+        if (!hasCurrentLevel || walls == null || !IsInside(playerCell))
+        {
+            return false;
+        }
+
+        CancelPreparedWallShift();
+        safeRadius = Mathf.Max(1, safeRadius);
+        CollectShiftCandidates(playerCell, protectedTrail, safeRadius);
+        if (shiftOpenEdges.Count == 0 || shiftClosedEdges.Count == 0)
+        {
+            return false;
+        }
+
+        int maximumAttempts = Mathf.Min(
+            512,
+            shiftOpenEdges.Count * shiftClosedEdges.Count);
+
+        for (int attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            LoopCandidate edgeToOpen = shiftClosedEdges[
+                UnityEngine.Random.Range(0, shiftClosedEdges.Count)];
+            LoopCandidate edgeToClose = shiftOpenEdges[
+                UnityEngine.Random.Range(0, shiftOpenEdges.Count)];
+
+            if (!EdgesShareCell(edgeToOpen, edgeToClose))
+            {
+                continue;
+            }
+
+            SetEdgeOpen(edgeToOpen, true);
+            SetEdgeOpen(edgeToClose, false);
+            bool remainsConnected = IsEntireMazeReachable(playerCell);
+            SetEdgeOpen(edgeToClose, true);
+            SetEdgeOpen(edgeToOpen, false);
+
+            if (!remainsConnected)
+            {
+                continue;
+            }
+
+            preparedEdgeToOpen = edgeToOpen;
+            preparedEdgeToClose = edgeToClose;
+            hasPreparedShift = true;
+            preparedPassageIsOpen = false;
+            ShowPreparedShiftWarnings();
+            return true;
+        }
+
+        return false;
+    }
+
+    internal void SetShiftWarningAlpha(float alpha)
+    {
+        // Opening an edge removes its existing wall, so preview it in red.
+        SetWarningLineAlpha(shiftOpenWarning, new Color(1f, 0.12f, 0.08f), alpha);
+
+        // Closing an edge creates a new wall, so preview it in green.
+        SetWarningLineAlpha(shiftCloseWarning, new Color(0.12f, 0.8f, 0.3f), alpha);
+    }
+
+    internal void OpenPreparedShiftPassage()
+    {
+        if (!hasPreparedShift || preparedPassageIsOpen)
+        {
+            return;
+        }
+
+        SetEdgeOpen(preparedEdgeToOpen, true);
+        preparedPassageIsOpen = true;
+        BuildMazeMesh();
+        BuildNavigationData();
+        if (shiftOpenWarning != null)
+        {
+            shiftOpenWarning.enabled = false;
+        }
+    }
+
+    internal void CompletePreparedWallShift()
+    {
+        if (!hasPreparedShift)
+        {
+            return;
+        }
+
+        if (!preparedPassageIsOpen)
+        {
+            SetEdgeOpen(preparedEdgeToOpen, true);
+        }
+
+        SetEdgeOpen(preparedEdgeToClose, false);
+        BuildMazeMesh();
+        BuildNavigationData();
+        ClearPreparedShift();
+        WallLayoutChanged?.Invoke(this);
+    }
+
+    internal void CancelPreparedWallShift()
+    {
+        if (hasPreparedShift && preparedPassageIsOpen)
+        {
+            SetEdgeOpen(preparedEdgeToOpen, false);
+            BuildMazeMesh();
+            BuildNavigationData();
+        }
+
+        ClearPreparedShift();
+    }
+
     /// <summary>Raised after geometry and navigation data are ready.</summary>
     internal event Action<MazeGenerator> MazeGenerated;
+    internal event Action<MazeGenerator> WallLayoutChanged;
 
     [Flags]
     private enum Wall
@@ -132,17 +267,32 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
     }
 
+    private readonly struct LoopCandidate
+    {
+        internal readonly Vector2Int Cell;
+        internal readonly Vector2Int NeighbourCell;
+        internal readonly Wall Direction;
+        internal readonly Wall OppositeDirection;
+
+        internal LoopCandidate(
+            Vector2Int cell,
+            Vector2Int neighbourCell,
+            Wall direction,
+            Wall oppositeDirection)
+        {
+            Cell = cell;
+            NeighbourCell = neighbourCell;
+            Direction = direction;
+            OppositeDirection = oppositeDirection;
+        }
+    }
+
     private void Awake()
     {
         if (endpointVisual != null)
         {
             endpointVisual.gameObject.SetActive(false);
         }
-    }
-
-    private void Start()
-    {
-        GenerateNewLevel();
     }
 
     /// <summary>Chooses a fresh difficulty and seed, then builds a new maze.</summary>
@@ -153,6 +303,54 @@ internal sealed class MazeGenerator : MonoBehaviour
         currentDifficulty = (MazeDifficulty)new System.Random(currentLevelSeed).Next(3);
         hasCurrentLevel = true;
         GenerateCurrentLevel();
+    }
+
+    /// <summary>Builds a fresh level using the difficulty selected by the player.</summary>
+    internal void GenerateNewLevel(MazeDifficulty difficulty)
+    {
+        currentLevelSeed = useRandomSeed ? CreateRandomSeed() : seed;
+        currentDifficulty = difficulty;
+        hasCurrentLevel = true;
+        GenerateCurrentLevel();
+    }
+
+    /// <summary>Builds a level from persistent settings and an optional shifted layout.</summary>
+    internal void GenerateSavedLevel(
+        MazeDifficulty difficulty,
+        int levelSeed,
+        string savedWallLayout)
+    {
+        currentLevelSeed = levelSeed;
+        currentDifficulty = difficulty;
+        hasCurrentLevel = true;
+        GenerateCurrentLevel(savedWallLayout);
+    }
+
+    internal static int CreateLevelSeed()
+    {
+        return CreateRandomSeed();
+    }
+
+    internal string CaptureWallLayout()
+    {
+        if (walls == null
+            || walls.GetLength(0) != columns
+            || walls.GetLength(1) != rows)
+        {
+            return string.Empty;
+        }
+
+        byte[] wallData = new byte[columns * rows];
+        int dataIndex = 0;
+        for (int y = 0; y < rows; y++)
+        {
+            for (int x = 0; x < columns; x++)
+            {
+                wallData[dataIndex++] = (byte)walls[x, y];
+            }
+        }
+
+        return Convert.ToBase64String(wallData);
     }
 
     /// <summary>Rebuilds the current maze without changing its difficulty or seed.</summary>
@@ -168,7 +366,7 @@ internal sealed class MazeGenerator : MonoBehaviour
         GenerateCurrentLevel();
     }
 
-    private void GenerateCurrentLevel()
+    private void GenerateCurrentLevel(string savedWallLayout = null)
     {
         ClampSettings();
         EnsureRenderObjects();
@@ -176,9 +374,10 @@ internal sealed class MazeGenerator : MonoBehaviour
         EnsureGenerationBuffers();
         UpdateDifficultyText();
 
-        CarvePassages(
-            new System.Random(currentLevelSeed),
-            GetNewestCellChance(currentDifficulty));
+        System.Random random = new System.Random(currentLevelSeed);
+        CarvePassages(random);
+        AddDifficultyLoops(random);
+        RestoreWallLayout(savedWallLayout);
         BuildMazeMesh();
         BuildNavigationData();
         PositionEndpointVisual();
@@ -192,31 +391,46 @@ internal sealed class MazeGenerator : MonoBehaviour
         MazeGenerated?.Invoke(this);
     }
 
+    private void RestoreWallLayout(string savedWallLayout)
+    {
+        if (string.IsNullOrEmpty(savedWallLayout))
+        {
+            return;
+        }
+
+        try
+        {
+            byte[] wallData = Convert.FromBase64String(savedWallLayout);
+            if (wallData.Length != columns * rows)
+            {
+                return;
+            }
+
+            int dataIndex = 0;
+            for (int y = 0; y < rows; y++)
+            {
+                for (int x = 0; x < columns; x++)
+                {
+                    walls[x, y] = (Wall)wallData[dataIndex++];
+                }
+            }
+        }
+        catch (FormatException)
+        {
+            Debug.LogWarning("Saved maze wall data was invalid; regenerated from its seed.", this);
+        }
+    }
+
     private static int CreateRandomSeed()
     {
         return unchecked(Environment.TickCount * 397 ^ Guid.NewGuid().GetHashCode());
-    }
-
-    private static float GetNewestCellChance(MazeDifficulty difficulty)
-    {
-        switch (difficulty)
-        {
-            case MazeDifficulty.Easy:
-                return EasyNewestCellChance;
-            case MazeDifficulty.Medium:
-                return MediumNewestCellChance;
-            case MazeDifficulty.Hard:
-                return HardNewestCellChance;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(difficulty));
-        }
     }
 
     private void UpdateDifficultyText()
     {
         if (difficultyText != null)
         {
-            difficultyText.text = currentDifficulty.ToString().ToUpperInvariant();
+            difficultyText.text = currentDifficulty.ToString();
         }
     }
 
@@ -277,6 +491,41 @@ internal sealed class MazeGenerator : MonoBehaviour
         {
             if (pointIndex < pointPopTweens.Length
                 && ReferenceEquals(pointPopTweens[pointIndex], sequence))
+            {
+                pointPopTweens[pointIndex] = null;
+            }
+        });
+    }
+
+    /// <summary>Smoothly enlarges or restores one selectable navigation point.</summary>
+    internal void SetNavigationPointHovered(int pointIndex, bool isHovered)
+    {
+        if (!showNavigationPoints || pointMesh == null
+            || pointIndex < 0 || pointIndex >= pointScales.Length)
+        {
+            return;
+        }
+
+        Tween activeTween = pointPopTweens[pointIndex];
+        if (activeTween != null && activeTween.IsActive())
+        {
+            activeTween.Kill();
+        }
+
+        float targetScale = isHovered ? navigationPointHoverScale : 1f;
+        Tween hoverTween = DOTween.To(
+                () => pointScales[pointIndex],
+                scale => SetNavigationPointScale(pointIndex, scale),
+                targetScale,
+                navigationPointHoverDuration)
+            .SetEase(Ease.OutQuad)
+            .SetTarget(this);
+        pointPopTweens[pointIndex] = hoverTween;
+
+        hoverTween.OnKill(() =>
+        {
+            if (pointIndex < pointPopTweens.Length
+                && ReferenceEquals(pointPopTweens[pointIndex], hoverTween))
             {
                 pointPopTweens[pointIndex] = null;
             }
@@ -392,6 +641,7 @@ internal sealed class MazeGenerator : MonoBehaviour
     [ContextMenu("Clear Maze")]
     private void ClearMaze()
     {
+        CancelPreparedWallShift();
         KillPointPopTweens();
         navigationPoints.Clear();
         StartPointIndex = -1;
@@ -451,7 +701,7 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
     }
 
-    private void CarvePassages(System.Random random, float newestCellChance)
+    private void ResetMazeWalls()
     {
         for (int x = 0; x < columns; x++)
         {
@@ -461,22 +711,24 @@ internal sealed class MazeGenerator : MonoBehaviour
                 visited[x, y] = false;
             }
         }
+    }
 
-        int activeCellCount = 1;
+    private void CarvePassages(System.Random random)
+    {
+        ResetMazeWalls();
+
+        int stackCount = 1;
         activeCells[0] = Vector2Int.zero;
         visited[0, 0] = true;
 
-        while (activeCellCount > 0)
+        while (stackCount > 0)
         {
-            int activeCellIndex = random.NextDouble() < newestCellChance
-                ? activeCellCount - 1
-                : random.Next(activeCellCount);
-            Vector2Int current = activeCells[activeCellIndex];
+            Vector2Int current = activeCells[stackCount - 1];
             int choiceCount = GetUnvisitedNeighbours(current);
 
             if (choiceCount == 0)
             {
-                RemoveActiveCell(activeCellIndex, ref activeCellCount);
+                stackCount--;
                 continue;
             }
 
@@ -484,18 +736,293 @@ internal sealed class MazeGenerator : MonoBehaviour
             walls[current.x, current.y] &= ~next.Direction;
             walls[next.Position.x, next.Position.y] &= ~next.OppositeDirection;
             visited[next.Position.x, next.Position.y] = true;
-            activeCells[activeCellCount++] = next.Position;
+            activeCells[stackCount++] = next.Position;
         }
     }
 
-    private void RemoveActiveCell(int activeCellIndex, ref int activeCellCount)
+    private void AddDifficultyLoops(System.Random random)
     {
-        for (int index = activeCellIndex; index < activeCellCount - 1; index++)
+        float extraPassageRatio;
+        switch (currentDifficulty)
         {
-            activeCells[index] = activeCells[index + 1];
+            case MazeDifficulty.Easy:
+                return;
+            case MazeDifficulty.Medium:
+                extraPassageRatio = MediumExtraPassageRatio;
+                break;
+            case MazeDifficulty.Hard:
+                extraPassageRatio = HardExtraPassageRatio;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
         }
 
-        activeCellCount--;
+        CollectLoopCandidates();
+        int passageCount = Mathf.Min(
+            loopCandidates.Count,
+            Mathf.Max(1, Mathf.RoundToInt(columns * rows * extraPassageRatio)));
+
+        for (int index = 0; index < passageCount; index++)
+        {
+            int randomIndex = random.Next(index, loopCandidates.Count);
+            LoopCandidate candidate = loopCandidates[randomIndex];
+            loopCandidates[randomIndex] = loopCandidates[index];
+            loopCandidates[index] = candidate;
+
+            walls[candidate.Cell.x, candidate.Cell.y] &= ~candidate.Direction;
+            walls[candidate.NeighbourCell.x, candidate.NeighbourCell.y]
+                &= ~candidate.OppositeDirection;
+        }
+    }
+
+    private void CollectLoopCandidates()
+    {
+        loopCandidates.Clear();
+
+        for (int x = 0; x < columns; x++)
+        {
+            for (int y = 0; y < rows; y++)
+            {
+                Vector2Int cell = new Vector2Int(x, y);
+
+                if (x + 1 < columns && HasWall(x, y, Wall.East))
+                {
+                    loopCandidates.Add(new LoopCandidate(
+                        cell,
+                        cell + Vector2Int.right,
+                        Wall.East,
+                        Wall.West));
+                }
+
+                if (y + 1 < rows && HasWall(x, y, Wall.North))
+                {
+                    loopCandidates.Add(new LoopCandidate(
+                        cell,
+                        cell + Vector2Int.up,
+                        Wall.North,
+                        Wall.South));
+                }
+            }
+        }
+    }
+
+    private void CollectShiftCandidates(
+        Vector2Int playerCell,
+        IReadOnlyList<Vector2Int> protectedTrail,
+        int safeRadius)
+    {
+        shiftOpenEdges.Clear();
+        shiftClosedEdges.Clear();
+
+        for (int x = 0; x < columns; x++)
+        {
+            for (int y = 0; y < rows; y++)
+            {
+                Vector2Int cell = new Vector2Int(x, y);
+
+                if (x + 1 < columns)
+                {
+                    AddShiftCandidate(
+                        new LoopCandidate(
+                            cell,
+                            cell + Vector2Int.right,
+                            Wall.East,
+                            Wall.West),
+                        playerCell,
+                        protectedTrail,
+                        safeRadius);
+                }
+
+                if (y + 1 < rows)
+                {
+                    AddShiftCandidate(
+                        new LoopCandidate(
+                            cell,
+                            cell + Vector2Int.up,
+                            Wall.North,
+                            Wall.South),
+                        playerCell,
+                        protectedTrail,
+                        safeRadius);
+                }
+            }
+        }
+    }
+
+    private void AddShiftCandidate(
+        LoopCandidate candidate,
+        Vector2Int playerCell,
+        IReadOnlyList<Vector2Int> protectedTrail,
+        int safeRadius)
+    {
+        if (ManhattanDistance(candidate.Cell, playerCell) <= safeRadius
+            || ManhattanDistance(candidate.NeighbourCell, playerCell) <= safeRadius)
+        {
+            return;
+        }
+
+        bool hasWall = HasWall(
+            candidate.Cell.x,
+            candidate.Cell.y,
+            candidate.Direction);
+
+        if (hasWall)
+        {
+            shiftClosedEdges.Add(candidate);
+        }
+        else if (!IsProtectedTrailEdge(candidate, protectedTrail))
+        {
+            shiftOpenEdges.Add(candidate);
+        }
+    }
+
+    private static bool IsProtectedTrailEdge(
+        LoopCandidate candidate,
+        IReadOnlyList<Vector2Int> protectedTrail)
+    {
+        if (protectedTrail == null)
+        {
+            return false;
+        }
+
+        for (int index = 1; index < protectedTrail.Count; index++)
+        {
+            Vector2Int first = protectedTrail[index - 1];
+            Vector2Int second = protectedTrail[index];
+            if ((first == candidate.Cell && second == candidate.NeighbourCell)
+                || (second == candidate.Cell && first == candidate.NeighbourCell))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool EdgesShareCell(LoopCandidate first, LoopCandidate second)
+    {
+        return first.Cell == second.Cell
+            || first.Cell == second.NeighbourCell
+            || first.NeighbourCell == second.Cell
+            || first.NeighbourCell == second.NeighbourCell;
+    }
+
+    private void SetEdgeOpen(LoopCandidate candidate, bool isOpen)
+    {
+        if (isOpen)
+        {
+            walls[candidate.Cell.x, candidate.Cell.y] &= ~candidate.Direction;
+            walls[candidate.NeighbourCell.x, candidate.NeighbourCell.y]
+                &= ~candidate.OppositeDirection;
+            return;
+        }
+
+        walls[candidate.Cell.x, candidate.Cell.y] |= candidate.Direction;
+        walls[candidate.NeighbourCell.x, candidate.NeighbourCell.y]
+            |= candidate.OppositeDirection;
+    }
+
+    private bool IsEntireMazeReachable(Vector2Int startCell)
+    {
+        Array.Clear(visited, 0, visited.Length);
+        int queueStart = 0;
+        int queueEnd = 1;
+        int visitedCount = 1;
+        activeCells[0] = startCell;
+        visited[startCell.x, startCell.y] = true;
+
+        while (queueStart < queueEnd)
+        {
+            Vector2Int cell = activeCells[queueStart++];
+
+            foreach (Vector2Int direction in CardinalDirections)
+            {
+                Vector2Int neighbour = cell + direction;
+                if (!IsInside(neighbour)
+                    || visited[neighbour.x, neighbour.y]
+                    || !CanMove(cell, direction))
+                {
+                    continue;
+                }
+
+                visited[neighbour.x, neighbour.y] = true;
+                activeCells[queueEnd++] = neighbour;
+                visitedCount++;
+            }
+        }
+
+        return visitedCount == columns * rows
+            && visited[columns - 1, rows - 1];
+    }
+
+    private static int ManhattanDistance(Vector2Int first, Vector2Int second)
+    {
+        return Mathf.Abs(first.x - second.x) + Mathf.Abs(first.y - second.y);
+    }
+
+    private void ShowPreparedShiftWarnings()
+    {
+        ConfigureWarningLine(shiftOpenWarning, preparedEdgeToOpen);
+        ConfigureWarningLine(shiftCloseWarning, preparedEdgeToClose);
+        SetShiftWarningAlpha(1f);
+    }
+
+    private void ConfigureWarningLine(LineRenderer line, LoopCandidate edge)
+    {
+        if (line == null)
+        {
+            return;
+        }
+
+        Vector3 firstCell = GetCellLocalPosition(edge.Cell.x, edge.Cell.y);
+        Vector3 secondCell = GetCellLocalPosition(
+            edge.NeighbourCell.x,
+            edge.NeighbourCell.y);
+        Vector3 centre = (firstCell + secondCell) * 0.5f;
+        Vector3 tangent = edge.Direction == Wall.East || edge.Direction == Wall.West
+            ? Vector3.up
+            : Vector3.right;
+        float halfLength = cellSize * 0.42f;
+        centre.z = -0.08f;
+        line.positionCount = 2;
+        line.SetPosition(0, centre - tangent * halfLength);
+        line.SetPosition(1, centre + tangent * halfLength);
+        line.enabled = true;
+    }
+
+    private static void SetWarningLineAlpha(
+        LineRenderer line,
+        Color baseColor,
+        float alpha)
+    {
+        if (line == null)
+        {
+            return;
+        }
+
+        Color color = new Color(
+            baseColor.r,
+            baseColor.g,
+            baseColor.b,
+            Mathf.Clamp01(alpha));
+        line.startColor = color;
+        line.endColor = color;
+    }
+
+    private void ClearPreparedShift()
+    {
+        hasPreparedShift = false;
+        preparedPassageIsOpen = false;
+
+        if (shiftOpenWarning != null)
+        {
+            shiftOpenWarning.enabled = false;
+        }
+
+        if (shiftCloseWarning != null)
+        {
+            shiftCloseWarning.enabled = false;
+        }
     }
 
     private int GetUnvisitedNeighbours(Vector2Int cell)
@@ -868,12 +1395,20 @@ internal sealed class MazeGenerator : MonoBehaviour
 
         Transform geometryTransform = GetOrCreateChild(GeometryObjectName);
         Transform pointTransform = GetOrCreateChild(PointObjectName);
-        RemoveLegacyChildren(geometryTransform, pointTransform);
+        Transform shiftOpenTransform = GetOrCreateChild(ShiftOpenWarningName);
+        Transform shiftCloseTransform = GetOrCreateChild(ShiftCloseWarningName);
+        RemoveLegacyChildren(
+            geometryTransform,
+            pointTransform,
+            shiftOpenTransform,
+            shiftCloseTransform);
 
         geometryFilter = GetOrAddComponent<MeshFilter>(geometryTransform.gameObject);
         geometryRenderer = GetOrAddComponent<MeshRenderer>(geometryTransform.gameObject);
         pointFilter = GetOrAddComponent<MeshFilter>(pointTransform.gameObject);
         pointRenderer = GetOrAddComponent<MeshRenderer>(pointTransform.gameObject);
+        shiftOpenWarning = GetOrAddComponent<LineRenderer>(shiftOpenTransform.gameObject);
+        shiftCloseWarning = GetOrAddComponent<LineRenderer>(shiftCloseTransform.gameObject);
 
         geometryMesh = GetOrCreateMesh(geometryFilter, "Runtime Maze Geometry");
         pointMesh = GetOrCreateMesh(pointFilter, "Runtime Maze Points");
@@ -881,6 +1416,8 @@ internal sealed class MazeGenerator : MonoBehaviour
 
         ConfigureRenderer(geometryRenderer, 0);
         ConfigureRenderer(pointRenderer, 2);
+        ConfigureShiftWarningLine(shiftOpenWarning);
+        ConfigureShiftWarningLine(shiftCloseWarning);
     }
 
     private Transform GetOrCreateChild(string childName)
@@ -896,12 +1433,17 @@ internal sealed class MazeGenerator : MonoBehaviour
         return child;
     }
 
-    private void RemoveLegacyChildren(Transform geometryTransform, Transform pointTransform)
+    private void RemoveLegacyChildren(
+        Transform geometryTransform,
+        Transform pointTransform,
+        Transform shiftOpenTransform,
+        Transform shiftCloseTransform)
     {
         for (int childIndex = generatedRoot.childCount - 1; childIndex >= 0; childIndex--)
         {
             Transform child = generatedRoot.GetChild(childIndex);
-            if (child == geometryTransform || child == pointTransform)
+            if (child == geometryTransform || child == pointTransform
+                || child == shiftOpenTransform || child == shiftCloseTransform)
             {
                 continue;
             }
@@ -921,6 +1463,21 @@ internal sealed class MazeGenerator : MonoBehaviour
     {
         T component = target.GetComponent<T>();
         return component != null ? component : target.AddComponent<T>();
+    }
+
+    private void ConfigureShiftWarningLine(LineRenderer line)
+    {
+        line.useWorldSpace = false;
+        line.loop = false;
+        line.sharedMaterial = runtimeMaterial;
+        line.startWidth = wallThickness * 1.8f;
+        line.endWidth = wallThickness * 1.8f;
+        line.numCapVertices = 8;
+        line.numCornerVertices = 4;
+        line.alignment = LineAlignment.TransformZ;
+        line.sortingOrder = 4;
+        line.positionCount = 0;
+        line.enabled = false;
     }
 
     private static Mesh GetOrCreateMesh(MeshFilter filter, string meshName)
@@ -1053,6 +1610,8 @@ internal sealed class MazeGenerator : MonoBehaviour
         cellSize = Mathf.Max(0.1f, cellSize);
         wallThickness = Mathf.Clamp(wallThickness, 0.02f, cellSize * 0.5f);
         navigationPointSize = Mathf.Clamp(navigationPointSize, 0.05f, 0.75f);
+        navigationPointHoverScale = Mathf.Max(1f, navigationPointHoverScale);
+        navigationPointHoverDuration = Mathf.Max(0.02f, navigationPointHoverDuration);
         navigationPointPopScale = Mathf.Max(1f, navigationPointPopScale);
         navigationPointPopDuration = Mathf.Max(0.02f, navigationPointPopDuration);
         cameraPadding = Mathf.Max(0f, cameraPadding);

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -34,6 +35,8 @@ internal sealed class PlayerMovement : MonoBehaviour
     private int destinationPointIndex = -1;
     private int activeTrailPositionIndex = -1;
     private int backtrackTargetTrailIndex = -1;
+    private int backtrackNextTrailIndex = -1;
+    private int hoveredPointIndex = -1;
     private Vector3 destinationPosition;
     private Vector3 movementOriginPosition;
     private Vector3 activeTrailSegmentStart;
@@ -45,10 +48,50 @@ internal sealed class PlayerMovement : MonoBehaviour
     private bool isBacktracking;
     private bool hasReachedEnd;
     private bool subscribedToMaze;
+    private bool inputLocked;
 
     private int CurrentPointIndex => currentPointIndex;
     private bool IsMoving => isMoving;
     private bool HasReachedEnd => hasReachedEnd;
+    internal bool IsCurrentlyMoving => isMoving;
+
+    internal void SetInputLocked(bool isLocked)
+    {
+        inputLocked = isLocked;
+        if (isLocked)
+        {
+            ClearPointHover();
+        }
+    }
+
+    internal bool TryGetCurrentCell(out Vector2Int cell)
+    {
+        if (mazeGenerator == null || currentPointIndex < 0
+            || currentPointIndex >= mazeGenerator.NavigationPoints.Count)
+        {
+            cell = default;
+            return false;
+        }
+
+        cell = mazeGenerator.GetNavigationPoint(currentPointIndex).Cell;
+        return true;
+    }
+
+    internal void CopyTrailCells(List<Vector2Int> destination)
+    {
+        destination.Clear();
+
+        for (int trailIndex = 0; trailIndex < trailPointIndices.Count; trailIndex++)
+        {
+            int pointIndex = trailPointIndices[trailIndex];
+            if (pointIndex >= 0 && pointIndex < mazeGenerator.NavigationPoints.Count)
+            {
+                destination.Add(mazeGenerator.GetNavigationPoint(pointIndex).Cell);
+            }
+        }
+    }
+
+    internal event Action LevelCompleted;
 
     private void Awake()
     {
@@ -84,12 +127,14 @@ internal sealed class PlayerMovement : MonoBehaviour
     {
         if (!isMoving)
         {
+            UpdatePointHover();
             ReadPointClick();
         }
     }
 
     private void OnDisable()
     {
+        ClearPointHover();
         UnsubscribeFromMaze();
     }
 
@@ -106,11 +151,13 @@ internal sealed class PlayerMovement : MonoBehaviour
         destinationPointIndex = -1;
         activeTrailPositionIndex = -1;
         backtrackTargetTrailIndex = -1;
+        backtrackNextTrailIndex = -1;
         movementCellCount = 0;
         nextPointPopStep = 0;
         isMoving = false;
         isBacktracking = false;
         hasReachedEnd = false;
+        hoveredPointIndex = -1;
 
         Vector3 startPosition = mazeGenerator.GetNavigationPointWorldPosition(currentPointIndex);
         startPosition.z = transform.position.z;
@@ -129,7 +176,7 @@ internal sealed class PlayerMovement : MonoBehaviour
         Mouse mouse = Mouse.current;
         if (mouse == null || !mouse.leftButton.wasReleasedThisFrame
             || mazeGenerator == null || inputCamera == null || currentPointIndex < 0
-            || hasReachedEnd)
+            || hasReachedEnd || inputLocked)
         {
             return;
         }
@@ -164,41 +211,90 @@ internal sealed class PlayerMovement : MonoBehaviour
 
     private void BeginMovement(int pointIndex)
     {
+        ClearPointHover();
         movementStartPointIndex = currentPointIndex;
         destinationPointIndex = pointIndex;
-        destinationPosition = mazeGenerator.GetNavigationPointWorldPosition(pointIndex);
-        destinationPosition.z = transform.position.z;
-        movementOriginPosition = transform.position;
-
-        MazeNavigationPoint startPoint = mazeGenerator.GetNavigationPoint(movementStartPointIndex);
-        MazeNavigationPoint endPoint = mazeGenerator.GetNavigationPoint(destinationPointIndex);
-        Vector2Int cellDelta = endPoint.Cell - startPoint.Cell;
-        movementCellDirection = new Vector2Int(
-            cellDelta.x == 0 ? 0 : (cellDelta.x > 0 ? 1 : -1),
-            cellDelta.y == 0 ? 0 : (cellDelta.y > 0 ? 1 : -1));
-        movementCellCount = Mathf.Abs(cellDelta.x) + Mathf.Abs(cellDelta.y);
-        nextPointPopStep = 0;
-
-        backtrackTargetTrailIndex = FindTrailPointIndex(pointIndex);
+        backtrackTargetTrailIndex = FindBacktrackJunction(pointIndex);
         isBacktracking = backtrackTargetTrailIndex >= 0;
         isMoving = true;
 
         if (isBacktracking)
         {
-            // Collapse the retraced section to one live segment. Its endpoint
-            // then moves towards the earlier route point, erasing only that part.
-            activeTrailPositionIndex = backtrackTargetTrailIndex + 1;
-            activeTrailSegmentStart = destinationPosition;
-            activeTrailSegmentEnd = transform.position;
+            // Retrace the recorded route point by point. Collapsing the whole
+            // return path into one segment can create diagonal shortcuts and
+            // unstable LineRenderer joins when the trail contains corners.
+            backtrackNextTrailIndex = trailPointIndices.Count - 2;
+            BeginNextBacktrackSegment();
         }
         else
         {
-            activeTrailPositionIndex = trailPositions.Count;
-            activeTrailSegmentStart = transform.position;
-            activeTrailSegmentEnd = destinationPosition;
+            BeginForwardSegment();
+        }
+    }
+
+    private void UpdatePointHover()
+    {
+        Mouse mouse = Mouse.current;
+        if (mouse == null || mazeGenerator == null || inputCamera == null
+            || currentPointIndex < 0 || hasReachedEnd || inputLocked)
+        {
+            ClearPointHover();
+            return;
         }
 
-        UpdateActiveTrailPosition(transform.position);
+        Vector2 pointerPosition = mouse.position.ReadValue();
+        if (viewportController != null
+            && !viewportController.IsPointerInsideViewport(pointerPosition))
+        {
+            ClearPointHover();
+            return;
+        }
+
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+        {
+            ClearPointHover();
+            return;
+        }
+
+        float cameraDistance = Mathf.Abs(inputCamera.transform.position.z - transform.position.z);
+        Vector3 worldPosition = inputCamera.ScreenToWorldPoint(
+            new Vector3(pointerPosition.x, pointerPosition.y, cameraDistance));
+        float selectionRadius = mazeGenerator.CellSize * selectionRadiusInCells;
+
+        int nextHoveredPoint = mazeGenerator.TryGetReachablePoint(
+            worldPosition,
+            currentPointIndex,
+            selectionRadius,
+            out int pointIndex)
+            ? pointIndex
+            : -1;
+
+        if (nextHoveredPoint == hoveredPointIndex)
+        {
+            return;
+        }
+
+        ClearPointHover();
+        hoveredPointIndex = nextHoveredPoint;
+        if (hoveredPointIndex >= 0)
+        {
+            mazeGenerator.SetNavigationPointHovered(hoveredPointIndex, true);
+        }
+    }
+
+    private void ClearPointHover()
+    {
+        if (hoveredPointIndex < 0)
+        {
+            return;
+        }
+
+        if (mazeGenerator != null)
+        {
+            mazeGenerator.SetNavigationPointHovered(hoveredPointIndex, false);
+        }
+
+        hoveredPointIndex = -1;
     }
 
     private void MoveTowardsDestination()
@@ -219,19 +315,46 @@ internal sealed class PlayerMovement : MonoBehaviour
 
         if (isBacktracking)
         {
-            CompleteBacktracking();
+            currentPointIndex = trailPointIndices[backtrackNextTrailIndex];
+            RemoveLastTrailPoint();
+
+            if (backtrackNextTrailIndex > backtrackTargetTrailIndex)
+            {
+                backtrackNextTrailIndex--;
+                BeginNextBacktrackSegment();
+                return;
+            }
+
+            if (currentPointIndex != destinationPointIndex)
+            {
+                // The clicked point lies beyond the part of the old trail that
+                // was retraced. The old segment is gone, so this remainder is
+                // a clean new forward segment from the junction to the target.
+                isBacktracking = false;
+                backtrackTargetTrailIndex = -1;
+                backtrackNextTrailIndex = -1;
+                BeginForwardSegment();
+                return;
+            }
         }
         else
         {
             CompleteForwardMovement();
+            currentPointIndex = destinationPointIndex;
         }
 
-        currentPointIndex = destinationPointIndex;
         hasReachedEnd = currentPointIndex == mazeGenerator.EndPointIndex;
+
+        if (hasReachedEnd)
+        {
+            LevelCompleted?.Invoke();
+        }
+
         movementStartPointIndex = -1;
         destinationPointIndex = -1;
         activeTrailPositionIndex = -1;
         backtrackTargetTrailIndex = -1;
+        backtrackNextTrailIndex = -1;
         movementCellCount = 0;
         nextPointPopStep = 0;
         isMoving = false;
@@ -273,32 +396,93 @@ internal sealed class PlayerMovement : MonoBehaviour
         }
     }
 
-    private void CompleteBacktracking()
+    private void BeginNextBacktrackSegment()
     {
-        int removeStartIndex = backtrackTargetTrailIndex + 1;
-        int removeCount = trailPositions.Count - removeStartIndex;
-        if (removeCount > 0)
+        int nextPointIndex = trailPointIndices[backtrackNextTrailIndex];
+        ConfigureMovementSegment(currentPointIndex, nextPointIndex);
+        activeTrailPositionIndex = backtrackNextTrailIndex + 1;
+        activeTrailSegmentStart = destinationPosition;
+        activeTrailSegmentEnd = transform.position;
+        UpdateActiveTrailPosition(transform.position);
+    }
+
+    private void BeginForwardSegment()
+    {
+        ConfigureMovementSegment(currentPointIndex, destinationPointIndex);
+        activeTrailPositionIndex = trailPositions.Count;
+        activeTrailSegmentStart = transform.position;
+        activeTrailSegmentEnd = destinationPosition;
+        UpdateActiveTrailPosition(transform.position);
+    }
+
+    private void ConfigureMovementSegment(int startPointIndex, int endPointIndex)
+    {
+        movementStartPointIndex = startPointIndex;
+        destinationPosition = mazeGenerator.GetNavigationPointWorldPosition(endPointIndex);
+        destinationPosition.z = transform.position.z;
+        movementOriginPosition = transform.position;
+
+        MazeNavigationPoint startPoint = mazeGenerator.GetNavigationPoint(startPointIndex);
+        MazeNavigationPoint endPoint = mazeGenerator.GetNavigationPoint(endPointIndex);
+        Vector2Int cellDelta = endPoint.Cell - startPoint.Cell;
+        movementCellDirection = new Vector2Int(
+            cellDelta.x == 0 ? 0 : (cellDelta.x > 0 ? 1 : -1),
+            cellDelta.y == 0 ? 0 : (cellDelta.y > 0 ? 1 : -1));
+        movementCellCount = Mathf.Abs(cellDelta.x) + Mathf.Abs(cellDelta.y);
+        nextPointPopStep = 0;
+    }
+
+    private void RemoveLastTrailPoint()
+    {
+        int lastTrailIndex = trailPositions.Count - 1;
+        if (lastTrailIndex <= backtrackTargetTrailIndex)
         {
-            trailPointIndices.RemoveRange(removeStartIndex, removeCount);
-            trailPositions.RemoveRange(removeStartIndex, removeCount);
+            return;
         }
 
+        trailPointIndices.RemoveAt(lastTrailIndex);
+        trailPositions.RemoveAt(lastTrailIndex);
         movementLine.positionCount = trailPositions.Count;
     }
 
-    private int FindTrailPointIndex(int pointIndex)
+    private int FindBacktrackJunction(int destinationIndex)
     {
-        // Search backwards because only the most recent occurrence belongs to
-        // the currently active route if the player has revisited a cell.
-        for (int trailIndex = trailPointIndices.Count - 2; trailIndex >= 0; trailIndex--)
+        if (trailPointIndices.Count < 2)
         {
-            if (trailPointIndices[trailIndex] == pointIndex)
-            {
-                return trailIndex;
-            }
+            return -1;
         }
 
-        return -1;
+        Vector2Int currentCell = mazeGenerator.GetNavigationPoint(currentPointIndex).Cell;
+        Vector2Int destinationCell = mazeGenerator.GetNavigationPoint(destinationIndex).Cell;
+        Vector2Int cellDelta = destinationCell - currentCell;
+        Vector2Int direction = new Vector2Int(
+            cellDelta.x == 0 ? 0 : (cellDelta.x > 0 ? 1 : -1),
+            cellDelta.y == 0 ? 0 : (cellDelta.y > 0 ? 1 : -1));
+        Vector2Int expectedPreviousCell = currentCell + direction;
+        int junctionTrailIndex = -1;
+
+        // Only retract the continuous tail that overlaps this new move. For
+        // 2 -> 3 followed by a click on 1, this finds point 2, removes 3 -> 2,
+        // and lets a new 2 -> 1 segment be drawn without a 180-degree join.
+        for (int trailIndex = trailPointIndices.Count - 2; trailIndex >= 0; trailIndex--)
+        {
+            MazeNavigationPoint trailPoint = mazeGenerator.GetNavigationPoint(
+                trailPointIndices[trailIndex]);
+            if (trailPoint.Cell != expectedPreviousCell)
+            {
+                break;
+            }
+
+            junctionTrailIndex = trailIndex;
+            if (trailPointIndices[trailIndex] == destinationIndex)
+            {
+                break;
+            }
+
+            expectedPreviousCell += direction;
+        }
+
+        return junctionTrailIndex;
     }
 
     private int GetPointIndexAtCell(Vector2Int targetCell)

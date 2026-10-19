@@ -153,6 +153,48 @@ internal sealed class MazeZoomController : MonoBehaviour
         previousScreenHeight = Screen.height;
     }
 
+    /// <summary>
+    /// Keeps a rotating maze inside the lower gameplay viewport. The projected
+    /// maze extents grow while diagonal, so both centering and zoom are updated.
+    /// </summary>
+    internal void FrameMazeForCurrentRotation()
+    {
+        if (mazeGenerator == null || controlledCamera == null)
+        {
+            return;
+        }
+
+        StopZoom();
+        SynchronizeOcclusionPanel();
+
+        Bounds mazeBounds = mazeGenerator.GetWorldBounds();
+        float angleRadians = controlledCamera.transform.eulerAngles.z * Mathf.Deg2Rad;
+        float absoluteCosine = Mathf.Abs(Mathf.Cos(angleRadians));
+        float absoluteSine = Mathf.Abs(Mathf.Sin(angleRadians));
+        float rotatedHalfWidth = mazeBounds.extents.x * absoluteCosine
+            + mazeBounds.extents.y * absoluteSine;
+        float rotatedHalfHeight = mazeBounds.extents.x * absoluteSine
+            + mazeBounds.extents.y * absoluteCosine;
+        float viewportTop = GetViewportTopNormalized();
+        float requiredVerticalSize = (rotatedHalfHeight + framingPadding)
+            / Mathf.Max(viewportTop, 0.05f);
+        float requiredHorizontalSize = (rotatedHalfWidth + framingPadding)
+            / Mathf.Max(controlledCamera.aspect, 0.05f);
+        float requiredSize = Mathf.Max(requiredVerticalSize, requiredHorizontalSize);
+
+        effectiveMaximumSize = Mathf.Max(maximumSize, requiredSize);
+        controlledCamera.orthographicSize = Mathf.Clamp(
+            requiredSize,
+            minimumSize,
+            effectiveMaximumSize);
+
+        Vector3 cameraPosition = mazeBounds.center
+            + controlledCamera.transform.up
+                * ((1f - viewportTop) * controlledCamera.orthographicSize);
+        cameraPosition.z = controlledCamera.transform.position.z;
+        controlledCamera.transform.position = cameraPosition;
+    }
+
     /// <summary>Stops an active zoom without changing the current camera size.</summary>
     private void StopZoom()
     {
