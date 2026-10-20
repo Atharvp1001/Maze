@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 
 /// <summary>
-/// Generates a perfect 2D maze and a lightweight point-to-point navigation
+/// Generates a 2D maze and a lightweight point-to-point navigation
 /// graph. The complete maze and all visible points use only two render meshes.
 /// No physics colliders are required.
 /// </summary>
@@ -59,8 +59,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     private const string ShiftCloseWarningName = "Shift Closing Warning";
     private const int PointCircleSegments = 20;
     private const int WallCapSegments = 20;
-    private const float MediumExtraPassageRatio = 0.025f;
-    private const float HardExtraPassageRatio = 0.05f;
+    private const float EasyExtraPassageRatio = 0.06f;
+    private const float MediumExtraPassageRatio = 0.03f;
     private static readonly Vector2Int[] CardinalDirections =
     {
         Vector2Int.up,
@@ -72,7 +72,12 @@ internal sealed class MazeGenerator : MonoBehaviour
     private Wall[,] walls;
     private bool[,] visited;
     private int[,] pointIndexByCell;
+    private int[,] pathDistances;
+    private Vector2Int[,] pathParents;
+    private Vector2Int[,] growthDirections;
+    private bool[,] solutionPathCells;
     private Vector2Int[] activeCells;
+    private int[] activeDepths;
     private readonly Neighbour[] neighbourBuffer = new Neighbour[4];
 
     private Transform generatedRoot;
@@ -98,19 +103,32 @@ internal sealed class MazeGenerator : MonoBehaviour
     private readonly List<LoopCandidate> loopCandidates = new List<LoopCandidate>(256);
     private readonly List<LoopCandidate> shiftOpenEdges = new List<LoopCandidate>(256);
     private readonly List<LoopCandidate> shiftClosedEdges = new List<LoopCandidate>(256);
+    private readonly List<LoopCandidate> preparedEdgesToOpen = new List<LoopCandidate>(8);
+    private readonly List<LoopCandidate> preparedEdgesToClose = new List<LoopCandidate>(8);
+    private readonly List<LineRenderer> shiftOpenWarningLines = new List<LineRenderer>(8);
+    private readonly List<LineRenderer> shiftCloseWarningLines = new List<LineRenderer>(8);
+    private readonly List<Vector2Int> solutionPath = new List<Vector2Int>(256);
 
     private int Columns => columns;
     private int Rows => rows;
     internal float CellSize => cellSize;
     private int currentLevelSeed;
     private MazeDifficulty currentDifficulty;
+    private bool useAdvancedGeneration;
+    private float baseComplexityMultiplier = 1f;
     private bool hasCurrentLevel;
     private bool hasPreparedShift;
     private bool preparedPassageIsOpen;
-    private LoopCandidate preparedEdgeToOpen;
-    private LoopCandidate preparedEdgeToClose;
     internal int StartPointIndex { get; private set; } = -1;
     internal int EndPointIndex { get; private set; } = -1;
+    internal int SolutionLength { get; private set; }
+    internal int SolutionTurnCount { get; private set; }
+    internal int SolutionJunctionCount { get; private set; }
+    internal int MisleadingBranchDepth { get; private set; }
+    internal int LongestMisleadingBranch { get; private set; }
+    internal int ShortDeadEndCount { get; private set; }
+    internal float ComplexityScore { get; private set; }
+    internal int CurrentLevelSeed => currentLevelSeed;
     private Vector3 StartWorldPosition => GetCellWorldPosition(0, 0);
     private Vector3 ExitWorldPosition => GetCellWorldPosition(columns - 1, rows - 1);
     internal IReadOnlyList<MazeNavigationPoint> NavigationPoints => navigationPoints;
@@ -122,13 +140,14 @@ internal sealed class MazeGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// Selects one local wall exchange without changing the maze yet.
-    /// The player's trail and nearby cells are excluded.
+    /// Selects a batch of local wall exchanges without changing the maze yet.
+    /// Open trail edges are excluded so the route already drawn by the player
+    /// is never closed by a shift.
     /// </summary>
     internal bool PrepareWallShift(
         Vector2Int playerCell,
         IReadOnlyList<Vector2Int> protectedTrail,
-        int safeRadius)
+        int exchangeCount)
     {
         if (!hasCurrentLevel || walls == null || !IsInside(playerCell))
         {
@@ -136,58 +155,82 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
 
         CancelPreparedWallShift();
-        safeRadius = Mathf.Max(1, safeRadius);
-        CollectShiftCandidates(playerCell, protectedTrail, safeRadius);
-        if (shiftOpenEdges.Count == 0 || shiftClosedEdges.Count == 0)
+        exchangeCount = Mathf.Max(1, exchangeCount);
+
+        for (int exchangeIndex = 0; exchangeIndex < exchangeCount; exchangeIndex++)
+        {
+            CollectShiftCandidates(protectedTrail);
+            int maximumAttempts = Mathf.Min(
+                512,
+                shiftOpenEdges.Count * shiftClosedEdges.Count);
+            bool exchangePrepared = false;
+
+            for (int attempt = 0; attempt < maximumAttempts; attempt++)
+            {
+                LoopCandidate edgeToOpen = shiftClosedEdges[
+                    UnityEngine.Random.Range(0, shiftClosedEdges.Count)];
+                LoopCandidate edgeToClose = shiftOpenEdges[
+                    UnityEngine.Random.Range(0, shiftOpenEdges.Count)];
+
+                if (!EdgesShareCell(edgeToOpen, edgeToClose)
+                    || IsAlreadyPrepared(edgeToOpen)
+                    || IsAlreadyPrepared(edgeToClose))
+                {
+                    continue;
+                }
+
+                SetEdgeOpen(edgeToOpen, true);
+                SetEdgeOpen(edgeToClose, false);
+                if (!IsEntireMazeReachable(playerCell))
+                {
+                    SetEdgeOpen(edgeToClose, true);
+                    SetEdgeOpen(edgeToOpen, false);
+                    continue;
+                }
+
+                preparedEdgesToOpen.Add(edgeToOpen);
+                preparedEdgesToClose.Add(edgeToClose);
+                exchangePrepared = true;
+                break;
+            }
+
+            if (!exchangePrepared)
+            {
+                break;
+            }
+        }
+
+        // Selection is validated cumulatively, then restored until the warning ends.
+        for (int index = preparedEdgesToOpen.Count - 1; index >= 0; index--)
+        {
+            SetEdgeOpen(preparedEdgesToClose[index], true);
+            SetEdgeOpen(preparedEdgesToOpen[index], false);
+        }
+
+        if (preparedEdgesToOpen.Count == 0)
         {
             return false;
         }
 
-        int maximumAttempts = Mathf.Min(
-            512,
-            shiftOpenEdges.Count * shiftClosedEdges.Count);
-
-        for (int attempt = 0; attempt < maximumAttempts; attempt++)
-        {
-            LoopCandidate edgeToOpen = shiftClosedEdges[
-                UnityEngine.Random.Range(0, shiftClosedEdges.Count)];
-            LoopCandidate edgeToClose = shiftOpenEdges[
-                UnityEngine.Random.Range(0, shiftOpenEdges.Count)];
-
-            if (!EdgesShareCell(edgeToOpen, edgeToClose))
-            {
-                continue;
-            }
-
-            SetEdgeOpen(edgeToOpen, true);
-            SetEdgeOpen(edgeToClose, false);
-            bool remainsConnected = IsEntireMazeReachable(playerCell);
-            SetEdgeOpen(edgeToClose, true);
-            SetEdgeOpen(edgeToOpen, false);
-
-            if (!remainsConnected)
-            {
-                continue;
-            }
-
-            preparedEdgeToOpen = edgeToOpen;
-            preparedEdgeToClose = edgeToClose;
-            hasPreparedShift = true;
-            preparedPassageIsOpen = false;
-            ShowPreparedShiftWarnings();
-            return true;
-        }
-
-        return false;
+        hasPreparedShift = true;
+        preparedPassageIsOpen = false;
+        ShowPreparedShiftWarnings();
+        return true;
     }
 
     internal void SetShiftWarningAlpha(float alpha)
     {
         // Opening an edge removes its existing wall, so preview it in red.
-        SetWarningLineAlpha(shiftOpenWarning, new Color(1f, 0.12f, 0.08f), alpha);
+        foreach (LineRenderer warningLine in shiftOpenWarningLines)
+        {
+            SetWarningLineAlpha(warningLine, new Color(1f, 0.12f, 0.08f), alpha);
+        }
 
         // Closing an edge creates a new wall, so preview it in green.
-        SetWarningLineAlpha(shiftCloseWarning, new Color(0.12f, 0.8f, 0.3f), alpha);
+        foreach (LineRenderer warningLine in shiftCloseWarningLines)
+        {
+            SetWarningLineAlpha(warningLine, new Color(0.12f, 0.8f, 0.3f), alpha);
+        }
     }
 
     internal void OpenPreparedShiftPassage()
@@ -197,13 +240,17 @@ internal sealed class MazeGenerator : MonoBehaviour
             return;
         }
 
-        SetEdgeOpen(preparedEdgeToOpen, true);
+        foreach (LoopCandidate edgeToOpen in preparedEdgesToOpen)
+        {
+            SetEdgeOpen(edgeToOpen, true);
+        }
+
         preparedPassageIsOpen = true;
         BuildMazeMesh();
         BuildNavigationData();
-        if (shiftOpenWarning != null)
+        foreach (LineRenderer warningLine in shiftOpenWarningLines)
         {
-            shiftOpenWarning.enabled = false;
+            warningLine.enabled = false;
         }
     }
 
@@ -216,10 +263,17 @@ internal sealed class MazeGenerator : MonoBehaviour
 
         if (!preparedPassageIsOpen)
         {
-            SetEdgeOpen(preparedEdgeToOpen, true);
+            foreach (LoopCandidate edgeToOpen in preparedEdgesToOpen)
+            {
+                SetEdgeOpen(edgeToOpen, true);
+            }
         }
 
-        SetEdgeOpen(preparedEdgeToClose, false);
+        foreach (LoopCandidate edgeToClose in preparedEdgesToClose)
+        {
+            SetEdgeOpen(edgeToClose, false);
+        }
+
         BuildMazeMesh();
         BuildNavigationData();
         ClearPreparedShift();
@@ -230,7 +284,11 @@ internal sealed class MazeGenerator : MonoBehaviour
     {
         if (hasPreparedShift && preparedPassageIsOpen)
         {
-            SetEdgeOpen(preparedEdgeToOpen, false);
+            foreach (LoopCandidate edgeToOpen in preparedEdgesToOpen)
+            {
+                SetEdgeOpen(edgeToOpen, false);
+            }
+
             BuildMazeMesh();
             BuildNavigationData();
         }
@@ -301,6 +359,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     {
         currentLevelSeed = useRandomSeed ? CreateRandomSeed() : seed;
         currentDifficulty = (MazeDifficulty)new System.Random(currentLevelSeed).Next(3);
+        useAdvancedGeneration = false;
+        baseComplexityMultiplier = 1f;
         hasCurrentLevel = true;
         GenerateCurrentLevel();
     }
@@ -310,6 +370,8 @@ internal sealed class MazeGenerator : MonoBehaviour
     {
         currentLevelSeed = useRandomSeed ? CreateRandomSeed() : seed;
         currentDifficulty = difficulty;
+        useAdvancedGeneration = false;
+        baseComplexityMultiplier = 1f;
         hasCurrentLevel = true;
         GenerateCurrentLevel();
     }
@@ -318,10 +380,17 @@ internal sealed class MazeGenerator : MonoBehaviour
     internal void GenerateSavedLevel(
         MazeDifficulty difficulty,
         int levelSeed,
-        string savedWallLayout)
+        string savedWallLayout,
+        bool shouldUseAdvancedGeneration,
+        float requestedBaseComplexityMultiplier)
     {
         currentLevelSeed = levelSeed;
         currentDifficulty = difficulty;
+        useAdvancedGeneration = shouldUseAdvancedGeneration;
+        baseComplexityMultiplier = Mathf.Clamp(
+            requestedBaseComplexityMultiplier,
+            0.5f,
+            1f);
         hasCurrentLevel = true;
         GenerateCurrentLevel(savedWallLayout);
     }
@@ -374,10 +443,28 @@ internal sealed class MazeGenerator : MonoBehaviour
         EnsureGenerationBuffers();
         UpdateDifficultyText();
 
-        System.Random random = new System.Random(currentLevelSeed);
-        CarvePassages(random);
-        AddDifficultyLoops(random);
-        RestoreWallLayout(savedWallLayout);
+        if (!string.IsNullOrEmpty(savedWallLayout))
+        {
+            CarvePassages(new System.Random(currentLevelSeed));
+            RestoreWallLayout(savedWallLayout);
+            AnalyzeMazeComplexity();
+        }
+        else if (useAdvancedGeneration)
+        {
+            System.Random random = new System.Random(currentLevelSeed);
+            CarveGrowingTree(random);
+            AnalyzeMazeComplexity();
+            StrengthenSolutionJunctions(random);
+            AnalyzeMazeComplexity();
+        }
+        else
+        {
+            System.Random random = new System.Random(currentLevelSeed);
+            CarvePassages(random);
+            AddDifficultyLoops(random);
+            AnalyzeMazeComplexity();
+        }
+
         BuildMazeMesh();
         BuildNavigationData();
         PositionEndpointVisual();
@@ -697,7 +784,12 @@ internal sealed class MazeGenerator : MonoBehaviour
             walls = new Wall[columns, rows];
             visited = new bool[columns, rows];
             pointIndexByCell = new int[columns, rows];
+            pathDistances = new int[columns, rows];
+            pathParents = new Vector2Int[columns, rows];
+            growthDirections = new Vector2Int[columns, rows];
+            solutionPathCells = new bool[columns, rows];
             activeCells = new Vector2Int[columns * rows];
+            activeDepths = new int[columns * rows];
         }
     }
 
@@ -724,7 +816,7 @@ internal sealed class MazeGenerator : MonoBehaviour
         while (stackCount > 0)
         {
             Vector2Int current = activeCells[stackCount - 1];
-            int choiceCount = GetUnvisitedNeighbours(current);
+            int choiceCount = GetUnvisitedGrowthNeighbours(current);
 
             if (choiceCount == 0)
             {
@@ -740,19 +832,457 @@ internal sealed class MazeGenerator : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Builds one difficulty-shaped maze. Random frontier selection creates
+    /// meaningful junctions, while committed growth runs make false routes
+    /// travel far enough to be believable instead of ending immediately.
+    /// </summary>
+    private void CarveGrowingTree(System.Random random)
+    {
+        ResetMazeWalls();
+        Array.Clear(growthDirections, 0, growthDirections.Length);
+
+        int activeCount = 1;
+        int committedCellIndex = -1;
+        int committedStepsRemaining = 0;
+        activeCells[0] = Vector2Int.zero;
+        visited[0, 0] = true;
+
+        while (activeCount > 0)
+        {
+            int activeIndex = committedStepsRemaining > 0
+                && committedCellIndex >= 0
+                && committedCellIndex < activeCount
+                    ? committedCellIndex
+                    : ChooseGrowthCellIndex(random, activeCount);
+            Vector2Int current = activeCells[activeIndex];
+            int choiceCount = GetUnvisitedNeighbours(current);
+
+            if (choiceCount == 0)
+            {
+                RemoveActiveCell(activeIndex, ref activeCount);
+                committedCellIndex = -1;
+                committedStepsRemaining = 0;
+                continue;
+            }
+
+            Neighbour next = ChooseGrowthNeighbour(current, choiceCount, random);
+            walls[current.x, current.y] &= ~next.Direction;
+            walls[next.Position.x, next.Position.y] &= ~next.OppositeDirection;
+            visited[next.Position.x, next.Position.y] = true;
+            growthDirections[next.Position.x, next.Position.y]
+                = next.Position - current;
+
+            activeCells[activeCount] = next.Position;
+            committedCellIndex = activeCount;
+            activeCount++;
+
+            if (committedStepsRemaining > 0)
+            {
+                committedStepsRemaining--;
+            }
+            else
+            {
+                committedStepsRemaining = GetCommittedGrowthLength(random) - 1;
+            }
+        }
+
+        ConnectEndpointFromFarthestNeighbour();
+    }
+
+    private int GetUnvisitedGrowthNeighbours(Vector2Int cell)
+    {
+        int count = GetUnvisitedNeighbours(cell);
+        Vector2Int endpoint = new Vector2Int(columns - 1, rows - 1);
+
+        for (int index = count - 1; index >= 0; index--)
+        {
+            if (neighbourBuffer[index].Position != endpoint)
+            {
+                continue;
+            }
+
+            for (int moveIndex = index; moveIndex < count - 1; moveIndex++)
+            {
+                neighbourBuffer[moveIndex] = neighbourBuffer[moveIndex + 1];
+            }
+
+            count--;
+        }
+
+        return count;
+    }
+
+    private void ConnectEndpointFromFarthestNeighbour()
+    {
+        Vector2Int endpoint = new Vector2Int(columns - 1, rows - 1);
+        CalculateDistancesFromStart();
+
+        Vector2Int selectedNeighbour = new Vector2Int(-1, -1);
+        int selectedDistance = -1;
+        foreach (Vector2Int direction in CardinalDirections)
+        {
+            Vector2Int neighbour = endpoint + direction;
+            if (!IsInside(neighbour)
+                || pathDistances[neighbour.x, neighbour.y] <= selectedDistance)
+            {
+                continue;
+            }
+
+            selectedNeighbour = neighbour;
+            selectedDistance = pathDistances[neighbour.x, neighbour.y];
+        }
+
+        if (selectedNeighbour.x < 0
+            || !TryGetWallPair(
+                selectedNeighbour,
+                endpoint,
+                out Wall directionToEndpoint,
+                out Wall directionFromEndpoint))
+        {
+            return;
+        }
+
+        walls[selectedNeighbour.x, selectedNeighbour.y] &= ~directionToEndpoint;
+        walls[endpoint.x, endpoint.y] &= ~directionFromEndpoint;
+        visited[endpoint.x, endpoint.y] = true;
+    }
+
+    private void CalculateDistancesFromStart()
+    {
+        for (int x = 0; x < columns; x++)
+        {
+            for (int y = 0; y < rows; y++)
+            {
+                pathDistances[x, y] = -1;
+            }
+        }
+
+        int queueStart = 0;
+        int queueEnd = 1;
+        activeCells[0] = Vector2Int.zero;
+        pathDistances[0, 0] = 0;
+
+        while (queueStart < queueEnd)
+        {
+            Vector2Int cell = activeCells[queueStart++];
+            foreach (Vector2Int direction in CardinalDirections)
+            {
+                Vector2Int neighbour = cell + direction;
+                if (!IsInside(neighbour)
+                    || pathDistances[neighbour.x, neighbour.y] >= 0
+                    || !CanMove(cell, direction))
+                {
+                    continue;
+                }
+
+                pathDistances[neighbour.x, neighbour.y]
+                    = pathDistances[cell.x, cell.y] + 1;
+                activeCells[queueEnd++] = neighbour;
+            }
+        }
+    }
+
+    private int ChooseGrowthCellIndex(System.Random random, int activeCount)
+    {
+        float newestChance;
+        switch (currentDifficulty)
+        {
+            case MazeDifficulty.Easy:
+                newestChance = 0.7f;
+                break;
+            case MazeDifficulty.Medium:
+                newestChance = 0.4f;
+                break;
+            case MazeDifficulty.Hard:
+                newestChance = 0.2f;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+
+        // Mechanically difficult modes deliberately use a slightly calmer base.
+        newestChance = Mathf.Lerp(0.75f, newestChance, baseComplexityMultiplier);
+        return random.NextDouble() < newestChance
+            ? activeCount - 1
+            : random.Next(activeCount);
+    }
+
+    private Neighbour ChooseGrowthNeighbour(
+        Vector2Int current,
+        int choiceCount,
+        System.Random random)
+    {
+        Vector2Int previousDirection = growthDirections[current.x, current.y];
+        float straightChance;
+        switch (currentDifficulty)
+        {
+            case MazeDifficulty.Easy:
+                straightChance = 0.55f;
+                break;
+            case MazeDifficulty.Medium:
+                straightChance = 0.38f;
+                break;
+            case MazeDifficulty.Hard:
+                straightChance = 0.22f;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+
+        if (previousDirection != Vector2Int.zero
+            && random.NextDouble() < straightChance)
+        {
+            for (int index = 0; index < choiceCount; index++)
+            {
+                if (neighbourBuffer[index].Position - current == previousDirection)
+                {
+                    return neighbourBuffer[index];
+                }
+            }
+        }
+
+        return neighbourBuffer[random.Next(choiceCount)];
+    }
+
+    private int GetCommittedGrowthLength(System.Random random)
+    {
+        int minimum;
+        int maximumExclusive;
+        switch (currentDifficulty)
+        {
+            case MazeDifficulty.Easy:
+                minimum = 2;
+                maximumExclusive = 5;
+                break;
+            case MazeDifficulty.Medium:
+                minimum = 4;
+                maximumExclusive = 8;
+                break;
+            case MazeDifficulty.Hard:
+                minimum = 6;
+                maximumExclusive = 11;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+
+        int shapedLength = random.Next(minimum, maximumExclusive);
+        return Mathf.Max(2, Mathf.RoundToInt(
+            Mathf.Lerp(2f, shapedLength, baseComplexityMultiplier)));
+    }
+
+    private void RemoveActiveCell(int index, ref int activeCount)
+    {
+        for (int moveIndex = index; moveIndex < activeCount - 1; moveIndex++)
+        {
+            activeCells[moveIndex] = activeCells[moveIndex + 1];
+        }
+
+        activeCount--;
+    }
+
+    /// <summary>
+    /// Moves existing deep subtrees onto underused points of the correct route.
+    /// Each move opens one wall and closes one wall, so the maze remains a tree
+    /// with exactly one solution instead of gaining shortcut loops.
+    /// </summary>
+    private void StrengthenSolutionJunctions(System.Random random)
+    {
+        if (solutionPath.Count < 5)
+        {
+            return;
+        }
+
+        float junctionDensity;
+        int minimumBranchDepth;
+        switch (currentDifficulty)
+        {
+            case MazeDifficulty.Easy:
+                junctionDensity = 0.08f;
+                minimumBranchDepth = 4;
+                break;
+            case MazeDifficulty.Medium:
+                junctionDensity = 0.11f;
+                minimumBranchDepth = 6;
+                break;
+            case MazeDifficulty.Hard:
+                junctionDensity = 0.14f;
+                minimumBranchDepth = 8;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+
+        int desiredJunctions = Mathf.Clamp(
+            Mathf.RoundToInt(
+                SolutionLength * junctionDensity * baseComplexityMultiplier),
+            2,
+            10);
+        minimumBranchDepth = Mathf.Max(3, Mathf.RoundToInt(
+            minimumBranchDepth * baseComplexityMultiplier));
+
+        int maximumAdjustments = Mathf.Max(
+            0,
+            desiredJunctions - SolutionJunctionCount);
+        for (int adjustment = 0; adjustment < maximumAdjustments; adjustment++)
+        {
+            bool movedDeepBranch = false;
+            int maximumAttempts = solutionPath.Count * 8;
+
+            for (int attempt = 0; attempt < maximumAttempts; attempt++)
+            {
+                int pathIndex = random.Next(1, solutionPath.Count - 1);
+                Vector2Int solutionCell = solutionPath[pathIndex];
+                if (CountOpenNeighbours(solutionCell) >= 3)
+                {
+                    continue;
+                }
+
+                int firstDirection = random.Next(CardinalDirections.Length);
+                for (int directionOffset = 0;
+                     directionOffset < CardinalDirections.Length;
+                     directionOffset++)
+                {
+                    Vector2Int branchCell = solutionCell
+                        + CardinalDirections[(firstDirection + directionOffset)
+                            % CardinalDirections.Length];
+                    if (!IsInside(branchCell)
+                        || solutionPathCells[branchCell.x, branchCell.y]
+                        || CanMove(solutionCell, branchCell - solutionCell))
+                    {
+                        continue;
+                    }
+
+                    Vector2Int oldParent = pathParents[branchCell.x, branchCell.y];
+                    if (!IsInside(oldParent)
+                        || solutionPathCells[oldParent.x, oldParent.y]
+                        || MeasureDescendantDepth(branchCell) < minimumBranchDepth
+                        || !TryGetWallPair(
+                            solutionCell,
+                            branchCell,
+                            out Wall newDirection,
+                            out Wall newOppositeDirection)
+                        || !TryGetWallPair(
+                            branchCell,
+                            oldParent,
+                            out Wall oldDirection,
+                            out Wall oldOppositeDirection))
+                    {
+                        continue;
+                    }
+
+                    walls[solutionCell.x, solutionCell.y] &= ~newDirection;
+                    walls[branchCell.x, branchCell.y] &= ~newOppositeDirection;
+                    walls[branchCell.x, branchCell.y] |= oldDirection;
+                    walls[oldParent.x, oldParent.y] |= oldOppositeDirection;
+                    movedDeepBranch = true;
+                    break;
+                }
+
+                if (movedDeepBranch)
+                {
+                    break;
+                }
+            }
+
+            if (!movedDeepBranch)
+            {
+                break;
+            }
+
+            AnalyzeMazeComplexity();
+        }
+    }
+
+    private int MeasureDescendantDepth(Vector2Int root)
+    {
+        int queueStart = 0;
+        int queueEnd = 1;
+        int maximumDepth = 1;
+        activeCells[0] = root;
+        activeDepths[0] = 1;
+
+        while (queueStart < queueEnd)
+        {
+            Vector2Int cell = activeCells[queueStart];
+            int depth = activeDepths[queueStart++];
+            maximumDepth = Mathf.Max(maximumDepth, depth);
+
+            foreach (Vector2Int direction in CardinalDirections)
+            {
+                Vector2Int child = cell + direction;
+                if (!IsInside(child)
+                    || pathParents[child.x, child.y] != cell)
+                {
+                    continue;
+                }
+
+                activeCells[queueEnd] = child;
+                activeDepths[queueEnd++] = depth + 1;
+            }
+        }
+
+        return maximumDepth;
+    }
+
+    private static bool TryGetWallPair(
+        Vector2Int from,
+        Vector2Int to,
+        out Wall direction,
+        out Wall oppositeDirection)
+    {
+        Vector2Int delta = to - from;
+        if (delta == Vector2Int.up)
+        {
+            direction = Wall.North;
+            oppositeDirection = Wall.South;
+            return true;
+        }
+
+        if (delta == Vector2Int.right)
+        {
+            direction = Wall.East;
+            oppositeDirection = Wall.West;
+            return true;
+        }
+
+        if (delta == Vector2Int.down)
+        {
+            direction = Wall.South;
+            oppositeDirection = Wall.North;
+            return true;
+        }
+
+        if (delta == Vector2Int.left)
+        {
+            direction = Wall.West;
+            oppositeDirection = Wall.East;
+            return true;
+        }
+
+        direction = Wall.None;
+        oppositeDirection = Wall.None;
+        return false;
+    }
+
     private void AddDifficultyLoops(System.Random random)
     {
         float extraPassageRatio;
         switch (currentDifficulty)
         {
             case MazeDifficulty.Easy:
-                return;
+                if (!useAdvancedGeneration)
+                {
+                    return;
+                }
+                extraPassageRatio = EasyExtraPassageRatio;
+                break;
             case MazeDifficulty.Medium:
                 extraPassageRatio = MediumExtraPassageRatio;
                 break;
             case MazeDifficulty.Hard:
-                extraPassageRatio = HardExtraPassageRatio;
-                break;
+                return;
             default:
                 throw new ArgumentOutOfRangeException();
         }
@@ -773,6 +1303,211 @@ internal sealed class MazeGenerator : MonoBehaviour
             walls[candidate.NeighbourCell.x, candidate.NeighbourCell.y]
                 &= ~candidate.OppositeDirection;
         }
+    }
+
+    private void AnalyzeMazeComplexity()
+    {
+        solutionPath.Clear();
+        Array.Clear(solutionPathCells, 0, solutionPathCells.Length);
+
+        for (int x = 0; x < columns; x++)
+        {
+            for (int y = 0; y < rows; y++)
+            {
+                pathDistances[x, y] = -1;
+                pathParents[x, y] = new Vector2Int(-1, -1);
+            }
+        }
+
+        Vector2Int start = Vector2Int.zero;
+        Vector2Int end = new Vector2Int(columns - 1, rows - 1);
+        int queueStart = 0;
+        int queueEnd = 1;
+        activeCells[0] = start;
+        pathDistances[0, 0] = 0;
+
+        while (queueStart < queueEnd)
+        {
+            Vector2Int cell = activeCells[queueStart++];
+            foreach (Vector2Int direction in CardinalDirections)
+            {
+                Vector2Int neighbour = cell + direction;
+                if (!IsInside(neighbour)
+                    || pathDistances[neighbour.x, neighbour.y] >= 0
+                    || !CanMove(cell, direction))
+                {
+                    continue;
+                }
+
+                pathDistances[neighbour.x, neighbour.y]
+                    = pathDistances[cell.x, cell.y] + 1;
+                pathParents[neighbour.x, neighbour.y] = cell;
+                activeCells[queueEnd++] = neighbour;
+            }
+        }
+
+        if (pathDistances[end.x, end.y] < 0)
+        {
+            SolutionLength = 0;
+            SolutionTurnCount = 0;
+            SolutionJunctionCount = 0;
+            MisleadingBranchDepth = 0;
+            LongestMisleadingBranch = 0;
+            ShortDeadEndCount = 0;
+            ComplexityScore = 0f;
+            return;
+        }
+
+        Vector2Int pathCell = end;
+        while (pathCell.x >= 0 && pathCell.y >= 0)
+        {
+            solutionPath.Add(pathCell);
+            solutionPathCells[pathCell.x, pathCell.y] = true;
+            if (pathCell == start)
+            {
+                break;
+            }
+
+            pathCell = pathParents[pathCell.x, pathCell.y];
+        }
+
+        solutionPath.Reverse();
+        SolutionLength = Mathf.Max(0, solutionPath.Count - 1);
+        SolutionTurnCount = 0;
+        SolutionJunctionCount = 0;
+
+        Vector2Int previousDirection = Vector2Int.zero;
+        for (int index = 0; index < solutionPath.Count; index++)
+        {
+            Vector2Int cell = solutionPath[index];
+            if (CountOpenNeighbours(cell) >= 3)
+            {
+                SolutionJunctionCount++;
+            }
+
+            if (index == 0)
+            {
+                continue;
+            }
+
+            Vector2Int direction = solutionPath[index] - solutionPath[index - 1];
+            if (index > 1 && direction != previousDirection)
+            {
+                SolutionTurnCount++;
+            }
+
+            previousDirection = direction;
+        }
+
+        int relevantBranchCells = 0;
+        int relevantDeadEnds = 0;
+        int branchComponents = 0;
+        MisleadingBranchDepth = 0;
+        LongestMisleadingBranch = 0;
+        ShortDeadEndCount = 0;
+        Array.Clear(visited, 0, visited.Length);
+
+        foreach (Vector2Int solutionCell in solutionPath)
+        {
+            foreach (Vector2Int direction in CardinalDirections)
+            {
+                Vector2Int neighbour = solutionCell + direction;
+                if (!IsInside(neighbour)
+                    || solutionPathCells[neighbour.x, neighbour.y]
+                    || visited[neighbour.x, neighbour.y]
+                    || !CanMove(solutionCell, direction))
+                {
+                    continue;
+                }
+
+                branchComponents++;
+                int branchQueueStart = 0;
+                int branchQueueEnd = 1;
+                activeCells[0] = neighbour;
+                activeDepths[0] = 1;
+                visited[neighbour.x, neighbour.y] = true;
+                int componentMaximumDepth = 0;
+
+                while (branchQueueStart < branchQueueEnd)
+                {
+                    Vector2Int branchCell = activeCells[branchQueueStart];
+                    int branchDepth = activeDepths[branchQueueStart++];
+                    relevantBranchCells++;
+                    componentMaximumDepth = Mathf.Max(
+                        componentMaximumDepth,
+                        branchDepth);
+                    if (CountOpenNeighbours(branchCell) <= 1)
+                    {
+                        relevantDeadEnds++;
+                        if (branchDepth <= 3)
+                        {
+                            ShortDeadEndCount++;
+                        }
+                    }
+
+                    foreach (Vector2Int branchDirection in CardinalDirections)
+                    {
+                        Vector2Int next = branchCell + branchDirection;
+                        if (!IsInside(next)
+                            || solutionPathCells[next.x, next.y]
+                            || visited[next.x, next.y]
+                            || !CanMove(branchCell, branchDirection))
+                        {
+                            continue;
+                        }
+
+                        visited[next.x, next.y] = true;
+                        activeCells[branchQueueEnd] = next;
+                        activeDepths[branchQueueEnd++] = branchDepth + 1;
+                    }
+                }
+
+                MisleadingBranchDepth += componentMaximumDepth;
+                LongestMisleadingBranch = Mathf.Max(
+                    LongestMisleadingBranch,
+                    componentMaximumDepth);
+            }
+        }
+
+        int cellCount = columns * rows;
+        int directDistance = columns + rows - 2;
+        float pathScore = Mathf.Clamp01((SolutionLength - directDistance)
+            / (float)Mathf.Max(1, cellCount - directDistance));
+        float turnScore = Mathf.Clamp01(SolutionTurnCount
+            / (float)Mathf.Max(1, SolutionLength) * 2f);
+        float junctionScore = Mathf.Clamp01(SolutionJunctionCount
+            / (float)Mathf.Max(1, solutionPath.Count) * 4f);
+        float branchDepthScore = Mathf.Clamp01(
+            (MisleadingBranchDepth + LongestMisleadingBranch * 1.5f)
+            / Mathf.Max(1f, solutionPath.Count * 0.8f));
+        float branchVarietyScore = Mathf.Clamp01(
+            (branchComponents * 2f + relevantDeadEnds + relevantBranchCells * 0.04f)
+            / Mathf.Max(1f, solutionPath.Count));
+        float shortDeadEndPenalty = Mathf.Clamp01(
+            ShortDeadEndCount / (float)Mathf.Max(1, branchComponents));
+
+        ComplexityScore = Mathf.Clamp01(
+            pathScore * 0.35f
+            + turnScore * 0.2f
+            + junctionScore * 0.15f
+            + branchDepthScore * 0.2f
+            + branchVarietyScore * 0.1f
+            - shortDeadEndPenalty * 0.1f);
+    }
+
+    private int CountOpenNeighbours(Vector2Int cell)
+    {
+        int count = 0;
+        foreach (Vector2Int direction in CardinalDirections)
+        {
+            Vector2Int neighbour = cell + direction;
+            if (IsInside(neighbour) && CanMove(cell, direction))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private void CollectLoopCandidates()
@@ -807,9 +1542,7 @@ internal sealed class MazeGenerator : MonoBehaviour
     }
 
     private void CollectShiftCandidates(
-        Vector2Int playerCell,
-        IReadOnlyList<Vector2Int> protectedTrail,
-        int safeRadius)
+        IReadOnlyList<Vector2Int> protectedTrail)
     {
         shiftOpenEdges.Clear();
         shiftClosedEdges.Clear();
@@ -828,9 +1561,7 @@ internal sealed class MazeGenerator : MonoBehaviour
                             cell + Vector2Int.right,
                             Wall.East,
                             Wall.West),
-                        playerCell,
-                        protectedTrail,
-                        safeRadius);
+                        protectedTrail);
                 }
 
                 if (y + 1 < rows)
@@ -841,9 +1572,7 @@ internal sealed class MazeGenerator : MonoBehaviour
                             cell + Vector2Int.up,
                             Wall.North,
                             Wall.South),
-                        playerCell,
-                        protectedTrail,
-                        safeRadius);
+                        protectedTrail);
                 }
             }
         }
@@ -851,16 +1580,8 @@ internal sealed class MazeGenerator : MonoBehaviour
 
     private void AddShiftCandidate(
         LoopCandidate candidate,
-        Vector2Int playerCell,
-        IReadOnlyList<Vector2Int> protectedTrail,
-        int safeRadius)
+        IReadOnlyList<Vector2Int> protectedTrail)
     {
-        if (ManhattanDistance(candidate.Cell, playerCell) <= safeRadius
-            || ManhattanDistance(candidate.NeighbourCell, playerCell) <= safeRadius)
-        {
-            return;
-        }
-
         bool hasWall = HasWall(
             candidate.Cell.x,
             candidate.Cell.y,
@@ -905,6 +1626,35 @@ internal sealed class MazeGenerator : MonoBehaviour
             || first.Cell == second.NeighbourCell
             || first.NeighbourCell == second.Cell
             || first.NeighbourCell == second.NeighbourCell;
+    }
+
+    private bool IsAlreadyPrepared(LoopCandidate candidate)
+    {
+        foreach (LoopCandidate preparedEdge in preparedEdgesToOpen)
+        {
+            if (EdgesMatch(candidate, preparedEdge))
+            {
+                return true;
+            }
+        }
+
+        foreach (LoopCandidate preparedEdge in preparedEdgesToClose)
+        {
+            if (EdgesMatch(candidate, preparedEdge))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool EdgesMatch(LoopCandidate first, LoopCandidate second)
+    {
+        return (first.Cell == second.Cell
+                && first.NeighbourCell == second.NeighbourCell)
+            || (first.Cell == second.NeighbourCell
+                && first.NeighbourCell == second.Cell);
     }
 
     private void SetEdgeOpen(LoopCandidate candidate, bool isOpen)
@@ -955,16 +1705,40 @@ internal sealed class MazeGenerator : MonoBehaviour
             && visited[columns - 1, rows - 1];
     }
 
-    private static int ManhattanDistance(Vector2Int first, Vector2Int second)
-    {
-        return Mathf.Abs(first.x - second.x) + Mathf.Abs(first.y - second.y);
-    }
-
     private void ShowPreparedShiftWarnings()
     {
-        ConfigureWarningLine(shiftOpenWarning, preparedEdgeToOpen);
-        ConfigureWarningLine(shiftCloseWarning, preparedEdgeToClose);
+        EnsureShiftWarningLineCount(preparedEdgesToOpen.Count);
+
+        for (int index = 0; index < shiftOpenWarningLines.Count; index++)
+        {
+            bool shouldShow = index < preparedEdgesToOpen.Count;
+            shiftOpenWarningLines[index].enabled = shouldShow;
+            shiftCloseWarningLines[index].enabled = shouldShow;
+            if (!shouldShow)
+            {
+                continue;
+            }
+
+            ConfigureWarningLine(shiftOpenWarningLines[index], preparedEdgesToOpen[index]);
+            ConfigureWarningLine(shiftCloseWarningLines[index], preparedEdgesToClose[index]);
+        }
+
         SetShiftWarningAlpha(1f);
+    }
+
+    private void EnsureShiftWarningLineCount(int requiredCount)
+    {
+        for (int index = shiftOpenWarningLines.Count; index < requiredCount; index++)
+        {
+            Transform openTransform = GetOrCreateChild($"{ShiftOpenWarningName} {index + 1}");
+            Transform closeTransform = GetOrCreateChild($"{ShiftCloseWarningName} {index + 1}");
+            LineRenderer openLine = GetOrAddComponent<LineRenderer>(openTransform.gameObject);
+            LineRenderer closeLine = GetOrAddComponent<LineRenderer>(closeTransform.gameObject);
+            ConfigureShiftWarningLine(openLine);
+            ConfigureShiftWarningLine(closeLine);
+            shiftOpenWarningLines.Add(openLine);
+            shiftCloseWarningLines.Add(closeLine);
+        }
     }
 
     private void ConfigureWarningLine(LineRenderer line, LoopCandidate edge)
@@ -1013,15 +1787,23 @@ internal sealed class MazeGenerator : MonoBehaviour
     {
         hasPreparedShift = false;
         preparedPassageIsOpen = false;
+        preparedEdgesToOpen.Clear();
+        preparedEdgesToClose.Clear();
 
-        if (shiftOpenWarning != null)
+        foreach (LineRenderer warningLine in shiftOpenWarningLines)
         {
-            shiftOpenWarning.enabled = false;
+            if (warningLine != null)
+            {
+                warningLine.enabled = false;
+            }
         }
 
-        if (shiftCloseWarning != null)
+        foreach (LineRenderer warningLine in shiftCloseWarningLines)
         {
-            shiftCloseWarning.enabled = false;
+            if (warningLine != null)
+            {
+                warningLine.enabled = false;
+            }
         }
     }
 
@@ -1409,6 +2191,10 @@ internal sealed class MazeGenerator : MonoBehaviour
         pointRenderer = GetOrAddComponent<MeshRenderer>(pointTransform.gameObject);
         shiftOpenWarning = GetOrAddComponent<LineRenderer>(shiftOpenTransform.gameObject);
         shiftCloseWarning = GetOrAddComponent<LineRenderer>(shiftCloseTransform.gameObject);
+        shiftOpenWarningLines.Clear();
+        shiftCloseWarningLines.Clear();
+        shiftOpenWarningLines.Add(shiftOpenWarning);
+        shiftCloseWarningLines.Add(shiftCloseWarning);
 
         geometryMesh = GetOrCreateMesh(geometryFilter, "Runtime Maze Geometry");
         pointMesh = GetOrCreateMesh(pointFilter, "Runtime Maze Points");
@@ -1443,7 +2229,9 @@ internal sealed class MazeGenerator : MonoBehaviour
         {
             Transform child = generatedRoot.GetChild(childIndex);
             if (child == geometryTransform || child == pointTransform
-                || child == shiftOpenTransform || child == shiftCloseTransform)
+                || child == shiftOpenTransform || child == shiftCloseTransform
+                || child.name.StartsWith(ShiftOpenWarningName, StringComparison.Ordinal)
+                || child.name.StartsWith(ShiftCloseWarningName, StringComparison.Ordinal))
             {
                 continue;
             }

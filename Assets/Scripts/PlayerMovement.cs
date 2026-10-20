@@ -54,6 +54,7 @@ internal sealed class PlayerMovement : MonoBehaviour
     private bool IsMoving => isMoving;
     private bool HasReachedEnd => hasReachedEnd;
     internal bool IsCurrentlyMoving => isMoving;
+    internal float MovementSpeed => movementSpeed;
 
     internal void SetInputLocked(bool isLocked)
     {
@@ -92,6 +93,7 @@ internal sealed class PlayerMovement : MonoBehaviour
     }
 
     internal event Action LevelCompleted;
+    internal event Action<int> PointsTravelled;
 
     private void Awake()
     {
@@ -312,6 +314,7 @@ internal sealed class PlayerMovement : MonoBehaviour
         }
 
         transform.position = destinationPosition;
+        PointsTravelled?.Invoke(movementCellCount);
 
         if (isBacktracking)
         {

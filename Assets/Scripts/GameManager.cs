@@ -22,13 +22,19 @@ internal sealed class GameManager : MonoBehaviour
     private const string SaveRowsKey = "Maze.Rows";
     private const string SaveSeedKey = "Maze.Seed";
     private const string SaveWallsKey = "Maze.Walls";
+    private const string SavePreviousDifficultyKey = "Maze.PreviousDifficulty";
+    private const string SaveDifficultyStreakKey = "Maze.DifficultyStreak";
+    private const string SavePreviousModeKey = "Maze.PreviousMode";
+    private const string SaveModeStreakKey = "Maze.ModeStreak";
+    private const string SaveMixedMechanicsKey = "Maze.MixedMechanics";
 
     private enum MazeMode
     {
         Normal,
         Timed,
         Rotating,
-        Shifting
+        Shifting,
+        Mixed
     }
 
     private enum MazeModeTestOverride
@@ -37,12 +43,26 @@ internal sealed class GameManager : MonoBehaviour
         Normal,
         Timed,
         Rotating,
-        Shifting
+        Shifting,
+        Mixed
+    }
+
+    [Flags]
+    private enum MazeMechanic
+    {
+        None = 0,
+        Timed = 1,
+        Rotating = 2,
+        Shifting = 4
     }
 
     [Header("Testing")]
     [Tooltip("Choose a mode to force it for testing. Leave this on Random for normal gameplay.")]
     [SerializeField] private MazeModeTestOverride testMazeMode = MazeModeTestOverride.Random;
+    [Tooltip("Clear all saved progression when Play mode starts. Uncheck this after the reset.")]
+    [SerializeField] private bool resetSavedProgress;
+    [Tooltip("Start directly at this level for testing. Use 0 to load progress normally.")]
+    [SerializeField, Min(0)] private int startAtLevel;
 
     [Header("Gameplay")]
     [SerializeField] private MazeGenerator mazeGenerator;
@@ -55,6 +75,7 @@ internal sealed class GameManager : MonoBehaviour
     [SerializeField] private GameObject mainMenuCanvas;
     [SerializeField] private GameObject gameCanvas;
     [SerializeField] private GameObject winCanvas;
+    [SerializeField] private GameObject loseCanvas;
 
     [Header("Menu")]
     [SerializeField] private Button playButton;
@@ -78,6 +99,16 @@ internal sealed class GameManager : MonoBehaviour
     [SerializeField] private TMP_Text winMessageText;
     [SerializeField] private TMP_Text winTimerText;
 
+    [Header("Lose UI")]
+    [SerializeField] private RectTransform loseHourglass;
+    [SerializeField] private RectTransform loseTitle;
+    [SerializeField] private RectTransform loseMessage;
+    [SerializeField] private RectTransform loseBack;
+    [SerializeField] private RectTransform loseRetry;
+    [SerializeField] private TMP_Text loseMessageText;
+    [SerializeField] private Button loseBackButton;
+    [SerializeField] private Button loseRetryButton;
+
     private static readonly string[] WinMessages =
     {
         "Awesome",
@@ -86,13 +117,24 @@ internal sealed class GameManager : MonoBehaviour
         "Brilliant"
     };
 
+    private static readonly string[] LoseMessages =
+    {
+        "Nice Try!",
+        "So Close!",
+        "Almost There!",
+        "Keep Going!"
+    };
+
     private MazeGenerator.MazeDifficulty selectedDifficulty;
+    private MazeGenerator.MazeDifficulty previousDifficulty;
     private readonly List<Vector2Int> protectedTrailCells = new List<Vector2Int>(128);
     private MazeMode currentMazeMode;
     private MazeMode previousMazeMode;
+    private MazeMechanic activeMechanics;
     private Quaternion defaultCameraRotation;
     private MazeZoomController mazeZoomController;
     private int currentLevel = 1;
+    private int consecutiveDifficultyCount;
     private int consecutiveModeCount;
     private int mazeColumns;
     private int mazeRows;
@@ -104,23 +146,37 @@ internal sealed class GameManager : MonoBehaviour
     private bool isAdvancingLevel;
     private bool levelIsRunning;
     private float timerValue;
-    private float rotationCountdown;
-    private float shiftCountdown;
+    private int pointsSinceRotation;
+    private int pointsSinceShift;
+    private int mixedEventCooldownPoints;
     private float targetCameraAngle;
     private bool shiftWarningIsRunning;
     private Sequence winSequence;
+    private Sequence loseSequence;
     private Vector3 winStarScale = Vector3.one;
     private Vector3 winTitleScale = Vector3.one;
     private Vector3 winMessageScale = Vector3.one;
     private Vector3 winTimerScale = Vector3.one;
+    private Vector3 loseHourglassScale = Vector3.one;
+    private Vector3 loseTitleScale = Vector3.one;
+    private Vector3 loseMessageScale = Vector3.one;
+    private Vector3 loseBackScale = Vector3.one;
+    private Vector3 loseRetryScale = Vector3.one;
 
     private void Awake()
     {
         CacheWinScreenScales();
+        CacheLoseScreenScales();
         if (winCanvas != null)
         {
             winCanvas.transform.localScale = Vector3.one;
             winCanvas.SetActive(false);
+        }
+
+        if (loseCanvas != null)
+        {
+            loseCanvas.transform.localScale = Vector3.one;
+            loseCanvas.SetActive(false);
         }
 
         if (gameplayCamera != null)
@@ -129,7 +185,19 @@ internal sealed class GameManager : MonoBehaviour
             mazeZoomController = gameplayCamera.GetComponent<MazeZoomController>();
         }
 
-        if (!TryLoadProgress())
+        if (resetSavedProgress)
+        {
+            ClearSavedProgress();
+            resetSavedProgress = false;
+        }
+
+        if (startAtLevel > 0)
+        {
+            ClearSavedProgress();
+            currentLevel = Mathf.Max(1, startAtLevel);
+            PrepareUpcomingLevel();
+        }
+        else if (!TryLoadProgress())
         {
             PrepareUpcomingLevel();
         }
@@ -151,6 +219,11 @@ internal sealed class GameManager : MonoBehaviour
         }
 
         UpdateTimer();
+        if (!levelIsRunning)
+        {
+            return;
+        }
+
         UpdateRotation();
         UpdateShiftingMaze();
     }
@@ -172,9 +245,20 @@ internal sealed class GameManager : MonoBehaviour
             restartButton.onClick.AddListener(RestartLevel);
         }
 
+        if (loseBackButton != null)
+        {
+            loseBackButton.onClick.AddListener(ReturnToMenuFromLoseScreen);
+        }
+
+        if (loseRetryButton != null)
+        {
+            loseRetryButton.onClick.AddListener(RetryFromLoseScreen);
+        }
+
         if (playerMovement != null)
         {
             playerMovement.LevelCompleted += HandleLevelCompleted;
+            playerMovement.PointsTravelled += HandlePointsTravelled;
         }
 
         if (mazeGenerator != null)
@@ -200,9 +284,20 @@ internal sealed class GameManager : MonoBehaviour
             restartButton.onClick.RemoveListener(RestartLevel);
         }
 
+        if (loseBackButton != null)
+        {
+            loseBackButton.onClick.RemoveListener(ReturnToMenuFromLoseScreen);
+        }
+
+        if (loseRetryButton != null)
+        {
+            loseRetryButton.onClick.RemoveListener(RetryFromLoseScreen);
+        }
+
         if (playerMovement != null)
         {
             playerMovement.LevelCompleted -= HandleLevelCompleted;
+            playerMovement.PointsTravelled -= HandlePointsTravelled;
         }
 
         if (mazeGenerator != null)
@@ -228,6 +323,11 @@ internal sealed class GameManager : MonoBehaviour
             winCanvas.SetActive(false);
         }
 
+        if (loseCanvas != null)
+        {
+            loseCanvas.SetActive(false);
+        }
+
         if (gameCanvas != null)
         {
             gameCanvas.SetActive(true);
@@ -245,7 +345,10 @@ internal sealed class GameManager : MonoBehaviour
             mazeGenerator.GenerateSavedLevel(
                 selectedDifficulty,
                 mazeSeed,
-                savedWallLayout);
+                savedWallLayout,
+                currentLevel > 5,
+                GetBaseMazeComplexityMultiplier());
+            mazeSeed = mazeGenerator.CurrentLevelSeed;
             hasActiveLevel = true;
             savedWallLayout = mazeGenerator.CaptureWallLayout();
             SaveProgress();
@@ -256,6 +359,7 @@ internal sealed class GameManager : MonoBehaviour
     private void ShowMainMenu()
     {
         StopWinAnimation();
+        StopLoseAnimation();
         Time.timeScale = 0f;
 
         if (gameCanvas != null)
@@ -273,6 +377,11 @@ internal sealed class GameManager : MonoBehaviour
             winCanvas.SetActive(false);
         }
 
+        if (loseCanvas != null)
+        {
+            loseCanvas.SetActive(false);
+        }
+
         SetGameplayWorldVisible(false);
         UpdateLabels();
     }
@@ -281,7 +390,15 @@ internal sealed class GameManager : MonoBehaviour
     {
         if (hasActiveLevel && mazeGenerator != null)
         {
+            StopAllCoroutines();
             levelIsRunning = false;
+            shiftWarningIsRunning = false;
+            mazeGenerator.CancelPreparedWallShift();
+            if (playerMovement != null)
+            {
+                playerMovement.SetInputLocked(false);
+            }
+
             ResetCameraRotation();
             mazeGenerator.RestartCurrentLevel();
             savedWallLayout = mazeGenerator.CaptureWallLayout();
@@ -297,7 +414,7 @@ internal sealed class GameManager : MonoBehaviour
             return;
         }
 
-        float completionTime = currentMazeMode == MazeMode.Timed
+        float completionTime = HasMechanic(MazeMechanic.Timed)
             ? Mathf.Max(0f, GetTimedMazeLimit() - timerValue)
             : Mathf.Max(0f, timerValue);
 
@@ -373,13 +490,13 @@ internal sealed class GameManager : MonoBehaviour
         winSequence = DOTween.Sequence()
             .SetUpdate(true)
             .AppendInterval(0.12f)
-            .Append(CreateWinPop(winStar, winStarScale, 0.42f))
+            .Append(CreatePop(winStar, winStarScale, 0.42f))
             .AppendInterval(0.08f)
-            .Append(CreateWinPop(winTitle, winTitleScale, 0.32f))
+            .Append(CreatePop(winTitle, winTitleScale, 0.32f))
             .AppendInterval(0.05f)
-            .Append(CreateWinPop(winMessage, winMessageScale, 0.3f))
+            .Append(CreatePop(winMessage, winMessageScale, 0.3f))
             .AppendInterval(0.08f)
-            .Append(CreateWinPop(winTimer, winTimerScale, 0.34f))
+            .Append(CreatePop(winTimer, winTimerScale, 0.34f))
             .Append(DOTween.To(
                     () => displayedTime,
                     value =>
@@ -396,7 +513,7 @@ internal sealed class GameManager : MonoBehaviour
         winSequence = null;
     }
 
-    private static Sequence CreateWinPop(
+    private static Sequence CreatePop(
         RectTransform target,
         Vector3 originalScale,
         float duration)
@@ -471,6 +588,73 @@ internal sealed class GameManager : MonoBehaviour
         ResetWinElementScales();
     }
 
+    private void CacheLoseScreenScales()
+    {
+        if (loseHourglass != null)
+        {
+            loseHourglassScale = loseHourglass.localScale;
+        }
+
+        if (loseTitle != null)
+        {
+            loseTitleScale = loseTitle.localScale;
+        }
+
+        if (loseMessage != null)
+        {
+            loseMessageScale = loseMessage.localScale;
+        }
+
+        if (loseBack != null)
+        {
+            loseBackScale = loseBack.localScale;
+        }
+
+        if (loseRetry != null)
+        {
+            loseRetryScale = loseRetry.localScale;
+        }
+    }
+
+    private void ResetLoseElementScales(Vector3? overrideScale = null)
+    {
+        if (loseHourglass != null)
+        {
+            loseHourglass.localScale = overrideScale ?? loseHourglassScale;
+        }
+
+        if (loseTitle != null)
+        {
+            loseTitle.localScale = overrideScale ?? loseTitleScale;
+        }
+
+        if (loseMessage != null)
+        {
+            loseMessage.localScale = overrideScale ?? loseMessageScale;
+        }
+
+        if (loseBack != null)
+        {
+            loseBack.localScale = overrideScale ?? loseBackScale;
+        }
+
+        if (loseRetry != null)
+        {
+            loseRetry.localScale = overrideScale ?? loseRetryScale;
+        }
+    }
+
+    private void StopLoseAnimation()
+    {
+        if (loseSequence != null)
+        {
+            loseSequence.Kill();
+            loseSequence = null;
+        }
+
+        ResetLoseElementScales();
+    }
+
     private void SetWinTimerText(float elapsedSeconds)
     {
         if (winTimerText == null)
@@ -509,11 +693,12 @@ internal sealed class GameManager : MonoBehaviour
 
     private void BeginLevelRuntime()
     {
-        timerValue = currentMazeMode == MazeMode.Timed
+        timerValue = HasMechanic(MazeMechanic.Timed)
             ? GetTimedMazeLimit()
             : 0f;
-        rotationCountdown = GetRotationInterval();
-        shiftCountdown = GetShiftInterval();
+        pointsSinceRotation = 0;
+        pointsSinceShift = 0;
+        mixedEventCooldownPoints = 0;
         targetCameraAngle = GetDefaultCameraAngle();
         levelIsRunning = true;
         UpdateTimerText();
@@ -521,7 +706,7 @@ internal sealed class GameManager : MonoBehaviour
 
     private void UpdateTimer()
     {
-        if (currentMazeMode == MazeMode.Timed)
+        if (HasMechanic(MazeMechanic.Timed))
         {
             timerValue = Mathf.Max(0f, timerValue - Time.deltaTime);
             UpdateTimerText();
@@ -542,8 +727,88 @@ internal sealed class GameManager : MonoBehaviour
     {
         levelIsRunning = false;
         ResetCameraRotation();
-        mazeGenerator.RestartCurrentLevel();
-        BeginLevelRuntime();
+        ShowLoseScreen();
+    }
+
+    private void ShowLoseScreen()
+    {
+        Time.timeScale = 0f;
+
+        if (gameCanvas != null)
+        {
+            gameCanvas.SetActive(false);
+        }
+
+        if (mainMenuCanvas != null)
+        {
+            mainMenuCanvas.SetActive(false);
+        }
+
+        if (winCanvas != null)
+        {
+            winCanvas.SetActive(false);
+        }
+
+        SetGameplayWorldVisible(false);
+
+        if (loseCanvas == null)
+        {
+            return;
+        }
+
+        StopLoseAnimation();
+        ResetLoseElementScales(Vector3.zero);
+
+        if (loseMessageText != null)
+        {
+            loseMessageText.text = LoseMessages[UnityEngine.Random.Range(0, LoseMessages.Length)];
+        }
+
+        loseCanvas.SetActive(true);
+        Canvas.ForceUpdateCanvases();
+
+        loseSequence = DOTween.Sequence()
+            .SetUpdate(true)
+            .AppendInterval(0.12f)
+            .Append(CreatePop(loseHourglass, loseHourglassScale, 0.42f))
+            .AppendInterval(0.08f)
+            .Append(CreatePop(loseTitle, loseTitleScale, 0.32f))
+            .AppendInterval(0.05f)
+            .Append(CreatePop(loseMessage, loseMessageScale, 0.3f))
+            .AppendInterval(0.08f)
+            .Append(CreatePop(loseBack, loseBackScale, 0.3f))
+            .Join(CreatePop(loseRetry, loseRetryScale, 0.3f));
+    }
+
+    private void RetryFromLoseScreen()
+    {
+        StopLoseAnimation();
+
+        if (loseCanvas != null)
+        {
+            loseCanvas.SetActive(false);
+        }
+
+        if (mainMenuCanvas != null)
+        {
+            mainMenuCanvas.SetActive(false);
+        }
+
+        if (gameCanvas != null)
+        {
+            gameCanvas.SetActive(true);
+        }
+
+        SetGameplayWorldVisible(true);
+        Time.timeScale = 1f;
+        RestartLevel();
+    }
+
+    private void ReturnToMenuFromLoseScreen()
+    {
+        // Prepare a fresh attempt so Play can resume this level from its start.
+        RestartLevel();
+        ShowMainMenu();
     }
 
     private void UpdateTimerText()
@@ -553,7 +818,7 @@ internal sealed class GameManager : MonoBehaviour
             return;
         }
 
-        int totalSeconds = currentMazeMode == MazeMode.Timed
+        int totalSeconds = HasMechanic(MazeMechanic.Timed)
             ? Mathf.CeilToInt(timerValue)
             : Mathf.FloorToInt(timerValue);
         int minutes = totalSeconds / 60;
@@ -563,16 +828,26 @@ internal sealed class GameManager : MonoBehaviour
 
     private void UpdateRotation()
     {
-        if (currentMazeMode != MazeMode.Rotating || gameplayCamera == null)
+        if (!HasMechanic(MazeMechanic.Rotating) || gameplayCamera == null)
         {
             return;
         }
 
-        rotationCountdown -= Time.deltaTime;
-        if (rotationCountdown <= 0f)
+        bool cameraReachedTarget = Mathf.Abs(Mathf.DeltaAngle(
+            gameplayCamera.transform.eulerAngles.z,
+            targetCameraAngle)) < 0.1f;
+        if (pointsSinceRotation >= GetRotationPointInterval()
+            && playerMovement != null
+            && !playerMovement.IsCurrentlyMoving
+            && cameraReachedTarget
+            && mixedEventCooldownPoints <= 0)
         {
             targetCameraAngle += UnityEngine.Random.value < 0.5f ? -90f : 90f;
-            rotationCountdown = GetRotationInterval();
+            pointsSinceRotation = 0;
+            if (currentMazeMode == MazeMode.Mixed)
+            {
+                mixedEventCooldownPoints = 3;
+            }
         }
 
         Vector3 eulerAngles = gameplayCamera.transform.eulerAngles;
@@ -586,15 +861,20 @@ internal sealed class GameManager : MonoBehaviour
 
     private void UpdateShiftingMaze()
     {
-        if (currentMazeMode != MazeMode.Shifting || mazeGenerator == null
+        if (!HasMechanic(MazeMechanic.Shifting) || mazeGenerator == null
             || playerMovement == null || shiftWarningIsRunning)
         {
             return;
         }
 
-        shiftCountdown -= Time.deltaTime;
-        if (shiftCountdown <= 0f && !playerMovement.IsCurrentlyMoving)
+        if (pointsSinceShift >= GetShiftPointInterval()
+            && !playerMovement.IsCurrentlyMoving
+            && mixedEventCooldownPoints <= 0)
         {
+            if (currentMazeMode == MazeMode.Mixed)
+            {
+                mixedEventCooldownPoints = 3;
+            }
             StartCoroutine(WarnAndShiftMaze());
         }
     }
@@ -615,17 +895,17 @@ internal sealed class GameManager : MonoBehaviour
             shiftPrepared = mazeGenerator.PrepareWallShift(
                 warningPlayerCell,
                 protectedTrailCells,
-                1);
+                GetWallExchangeCount());
         }
 
         if (!shiftPrepared)
         {
-            shiftCountdown = 1f;
+            pointsSinceShift = Mathf.Max(0, GetShiftPointInterval() - 1);
             shiftWarningIsRunning = false;
             yield break;
         }
 
-        if (gameplayMazeTypeText != null)
+        if (gameplayMazeTypeText != null && currentMazeMode != MazeMode.Mixed)
         {
             gameplayMazeTypeText.text = "Maze Shifting...";
         }
@@ -633,7 +913,7 @@ internal sealed class GameManager : MonoBehaviour
         float elapsed = 0f;
         while (elapsed < warningDuration
             && levelIsRunning
-            && currentMazeMode == MazeMode.Shifting)
+            && HasMechanic(MazeMechanic.Shifting))
         {
             elapsed += Time.deltaTime;
             if (gameplayMazeTypeText != null)
@@ -651,14 +931,14 @@ internal sealed class GameManager : MonoBehaviour
             yield return null;
         }
 
-        if (levelIsRunning && currentMazeMode == MazeMode.Shifting
+        if (levelIsRunning && HasMechanic(MazeMechanic.Shifting)
             && !playerMovement.IsCurrentlyMoving)
         {
             playerMovement.SetInputLocked(true);
             mazeGenerator.OpenPreparedShiftPassage();
             yield return new WaitForSeconds(passageOpenDelay);
 
-            if (levelIsRunning && currentMazeMode == MazeMode.Shifting
+            if (levelIsRunning && HasMechanic(MazeMechanic.Shifting)
                 && !playerMovement.IsCurrentlyMoving)
             {
                 mazeGenerator.CompletePreparedWallShift();
@@ -678,33 +958,81 @@ internal sealed class GameManager : MonoBehaviour
         if (gameplayMazeTypeText != null)
         {
             gameplayMazeTypeText.color = originalColor;
-            gameplayMazeTypeText.text = "Shifting Maze";
+            gameplayMazeTypeText.text = GetMazeModeLabel();
         }
 
-        shiftCountdown = GetShiftInterval();
+        pointsSinceShift = 0;
         shiftWarningIsRunning = false;
+    }
+
+    private void HandlePointsTravelled(int pointCount)
+    {
+        if (!levelIsRunning || pointCount <= 0)
+        {
+            return;
+        }
+
+        mixedEventCooldownPoints = Mathf.Max(0, mixedEventCooldownPoints - pointCount);
+
+        if (HasMechanic(MazeMechanic.Rotating))
+        {
+            pointsSinceRotation += pointCount;
+        }
+
+        if (HasMechanic(MazeMechanic.Shifting))
+        {
+            pointsSinceShift += pointCount;
+        }
     }
 
     private void SelectRandomMazeMode()
     {
         if (testMazeMode != MazeModeTestOverride.Random)
         {
-            currentMazeMode = (MazeMode)(testMazeMode - 1);
+            SetSelectedMazeMode((MazeMode)(testMazeMode - 1));
             return;
         }
 
-        MazeMode selectedMode;
-        int attempts = 0;
-
-        do
+        // Introduce all five modes once in a predictable tutorial sequence.
+        if (currentLevel <= 5)
         {
-            selectedMode = RollWeightedMazeMode();
-            attempts++;
+            SetSelectedMazeMode((MazeMode)(currentLevel - 1));
+            return;
         }
-        while (consecutiveModeCount >= 2
-            && selectedMode == previousMazeMode
-            && attempts < 12);
 
+        float totalWeight = 0f;
+        for (int modeIndex = 0; modeIndex <= (int)MazeMode.Mixed; modeIndex++)
+        {
+            MazeMode mode = (MazeMode)modeIndex;
+            if (IsModeAllowed(mode))
+            {
+                totalWeight += GetModeWeight(mode);
+            }
+        }
+
+        float roll = UnityEngine.Random.Range(0f, totalWeight);
+        MazeMode selectedMode = MazeMode.Normal;
+        for (int modeIndex = 0; modeIndex <= (int)MazeMode.Mixed; modeIndex++)
+        {
+            MazeMode mode = (MazeMode)modeIndex;
+            if (!IsModeAllowed(mode))
+            {
+                continue;
+            }
+
+            roll -= GetModeWeight(mode);
+            if (roll <= 0f)
+            {
+                selectedMode = mode;
+                break;
+            }
+        }
+
+        SetSelectedMazeMode(selectedMode);
+    }
+
+    private void SetSelectedMazeMode(MazeMode selectedMode)
+    {
         if (selectedMode == previousMazeMode)
         {
             consecutiveModeCount++;
@@ -716,73 +1044,125 @@ internal sealed class GameManager : MonoBehaviour
         }
 
         currentMazeMode = selectedMode;
+        SelectActiveMechanicsForMode();
     }
 
-    private MazeMode RollWeightedMazeMode()
+    private bool IsModeAllowed(MazeMode mode)
     {
-        float normalWeight;
-        float timedWeight;
-        float rotatingWeight;
-        float shiftingWeight;
-
-        switch (selectedDifficulty)
+        if (mode != previousMazeMode)
         {
-            case MazeGenerator.MazeDifficulty.Easy:
-                normalWeight = 50f;
-                timedWeight = 20f;
-                rotatingWeight = 15f;
-                shiftingWeight = 15f;
+            return true;
+        }
+
+        return mode == MazeMode.Mixed
+            ? consecutiveModeCount < 1
+            : consecutiveModeCount < 2;
+    }
+
+    private static float GetModeWeight(MazeMode mode)
+    {
+        return mode == MazeMode.Mixed ? 10f : 22.5f;
+    }
+
+    private void SelectActiveMechanicsForMode()
+    {
+        switch (currentMazeMode)
+        {
+            case MazeMode.Normal:
+                activeMechanics = MazeMechanic.None;
                 break;
-            case MazeGenerator.MazeDifficulty.Medium:
-                normalWeight = 35f;
-                timedWeight = 25f;
-                rotatingWeight = 20f;
-                shiftingWeight = 20f;
+            case MazeMode.Timed:
+                activeMechanics = MazeMechanic.Timed;
                 break;
-            case MazeGenerator.MazeDifficulty.Hard:
-                normalWeight = 20f;
-                timedWeight = 30f;
-                rotatingWeight = 25f;
-                shiftingWeight = 25f;
+            case MazeMode.Rotating:
+                activeMechanics = MazeMechanic.Rotating;
+                break;
+            case MazeMode.Shifting:
+                activeMechanics = MazeMechanic.Shifting;
+                break;
+            case MazeMode.Mixed:
+                if (selectedDifficulty == MazeGenerator.MazeDifficulty.Hard
+                    && UnityEngine.Random.value < 0.2f)
+                {
+                    activeMechanics = MazeMechanic.Timed
+                        | MazeMechanic.Rotating
+                        | MazeMechanic.Shifting;
+                    break;
+                }
+
+                int combination = UnityEngine.Random.Range(0, 3);
+                activeMechanics = combination == 0
+                    ? MazeMechanic.Timed | MazeMechanic.Rotating
+                    : combination == 1
+                        ? MazeMechanic.Timed | MazeMechanic.Shifting
+                        : MazeMechanic.Rotating | MazeMechanic.Shifting;
                 break;
             default:
                 throw new ArgumentOutOfRangeException();
         }
-
-        float levelShift = Mathf.Min((currentLevel - 1) * 1.5f, 15f);
-        normalWeight = Mathf.Max(10f, normalWeight - levelShift);
-        timedWeight += levelShift * 0.3f;
-        rotatingWeight += levelShift * 0.35f;
-        shiftingWeight += levelShift * 0.35f;
-        float roll = UnityEngine.Random.Range(
-            0f,
-            normalWeight + timedWeight + rotatingWeight + shiftingWeight);
-
-        if (roll < normalWeight)
-        {
-            return MazeMode.Normal;
-        }
-
-        if (roll < normalWeight + timedWeight)
-        {
-            return MazeMode.Timed;
-        }
-
-        return roll < normalWeight + timedWeight + rotatingWeight
-            ? MazeMode.Rotating
-            : MazeMode.Shifting;
     }
 
-    private float GetShiftInterval()
+    private bool HasMechanic(MazeMechanic mechanic)
     {
+        return (activeMechanics & mechanic) != 0;
+    }
+
+    private string GetMazeModeLabel()
+    {
+        return $"{currentMazeMode} Maze";
+    }
+
+    private int GetShiftPointInterval()
+    {
+        if (currentMazeMode == MazeMode.Mixed)
+        {
+            switch (selectedDifficulty)
+            {
+                case MazeGenerator.MazeDifficulty.Easy:
+                    return 14;
+                case MazeGenerator.MazeDifficulty.Medium:
+                    return 11;
+                case MazeGenerator.MazeDifficulty.Hard:
+                    return 9;
+            }
+        }
+
         switch (selectedDifficulty)
         {
             case MazeGenerator.MazeDifficulty.Easy:
-                return 12f;
+                return 10;
             case MazeGenerator.MazeDifficulty.Medium:
-                return 9f;
+                return 7;
             case MazeGenerator.MazeDifficulty.Hard:
-                return 7f;
+                return 5;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+    }
+
+    private int GetWallExchangeCount()
+    {
+        if (currentMazeMode == MazeMode.Mixed)
+        {
+            switch (selectedDifficulty)
+            {
+                case MazeGenerator.MazeDifficulty.Easy:
+                    return 2;
+                case MazeGenerator.MazeDifficulty.Medium:
+                    return 3;
+                case MazeGenerator.MazeDifficulty.Hard:
+                    return 4;
+            }
+        }
+
+        switch (selectedDifficulty)
+        {
+            case MazeGenerator.MazeDifficulty.Easy:
+                return 3;
+            case MazeGenerator.MazeDifficulty.Medium:
+                return UnityEngine.Random.Range(4, 6);
+            case MazeGenerator.MazeDifficulty.Hard:
+                return 6;
             default:
                 throw new ArgumentOutOfRangeException();
         }
@@ -790,54 +1170,108 @@ internal sealed class GameManager : MonoBehaviour
 
     private float GetTimedMazeLimit()
     {
-        float baseLimit;
+        if (currentLevel <= 5 || mazeGenerator == null)
+        {
+            return 120f;
+        }
+
+        int solutionLength = Mathf.Max(1, mazeGenerator.SolutionLength);
+        float movementSpeed = playerMovement != null
+            ? Mathf.Max(0.1f, playerMovement.MovementSpeed)
+            : 4f;
+        float travelTime = solutionLength * mazeGenerator.CellSize / movementSpeed;
+        float secondsPerStep;
+        float secondsPerTurn;
+        float secondsPerJunction;
+        float wrongRouteRatio;
+        float secondsPerWrongStep;
+        float safetyBuffer;
         float minimumLimit;
+        float maximumLimit;
 
         switch (selectedDifficulty)
         {
             case MazeGenerator.MazeDifficulty.Easy:
-                baseLimit = 120f;
-                minimumLimit = 75f;
+                secondsPerStep = 0.8f;
+                secondsPerTurn = 0.55f;
+                secondsPerJunction = 1.5f;
+                wrongRouteRatio = 0.35f;
+                secondsPerWrongStep = 0.4f;
+                safetyBuffer = 15f;
+                minimumLimit = 60f;
+                maximumLimit = 240f;
                 break;
             case MazeGenerator.MazeDifficulty.Medium:
-                baseLimit = 90f;
-                minimumLimit = 55f;
+                secondsPerStep = 0.65f;
+                secondsPerTurn = 0.5f;
+                secondsPerJunction = 1.3f;
+                wrongRouteRatio = 0.45f;
+                secondsPerWrongStep = 0.35f;
+                safetyBuffer = 13f;
+                minimumLimit = 50f;
+                maximumLimit = 210f;
                 break;
             case MazeGenerator.MazeDifficulty.Hard:
-                baseLimit = 65f;
-                minimumLimit = 40f;
+                secondsPerStep = 0.55f;
+                secondsPerTurn = 0.45f;
+                secondsPerJunction = 1.1f;
+                wrongRouteRatio = 0.55f;
+                secondsPerWrongStep = 0.3f;
+                safetyBuffer = 12f;
+                minimumLimit = 45f;
+                maximumLimit = 180f;
                 break;
             default:
                 throw new ArgumentOutOfRangeException();
         }
 
-        return Mathf.Max(minimumLimit, baseLimit - (currentLevel - 1) * 2f);
+        float reasonableWrongSteps = Mathf.Min(
+            mazeGenerator.MisleadingBranchDepth,
+            solutionLength * wrongRouteRatio
+                + mazeGenerator.LongestMisleadingBranch * 0.5f);
+        float limit = travelTime
+            + solutionLength * secondsPerStep
+            + mazeGenerator.SolutionTurnCount * secondsPerTurn
+            + mazeGenerator.SolutionJunctionCount * secondsPerJunction
+            + reasonableWrongSteps * secondsPerWrongStep
+            + safetyBuffer;
+
+        if (currentMazeMode == MazeMode.Mixed)
+        {
+            bool hasAllMechanics = activeMechanics
+                == (MazeMechanic.Timed | MazeMechanic.Rotating | MazeMechanic.Shifting);
+            limit *= hasAllMechanics ? 1.35f : 1.2f;
+        }
+
+        return Mathf.Clamp(limit, minimumLimit, maximumLimit);
     }
 
-    private float GetRotationInterval()
+    private int GetRotationPointInterval()
     {
-        float baseInterval;
-        float minimumInterval;
+        if (currentMazeMode == MazeMode.Mixed)
+        {
+            switch (selectedDifficulty)
+            {
+                case MazeGenerator.MazeDifficulty.Easy:
+                    return 12;
+                case MazeGenerator.MazeDifficulty.Medium:
+                    return 9;
+                case MazeGenerator.MazeDifficulty.Hard:
+                    return 7;
+            }
+        }
 
         switch (selectedDifficulty)
         {
             case MazeGenerator.MazeDifficulty.Easy:
-                baseInterval = 12f;
-                minimumInterval = 8f;
-                break;
+                return 8;
             case MazeGenerator.MazeDifficulty.Medium:
-                baseInterval = 9f;
-                minimumInterval = 6f;
-                break;
+                return 6;
             case MazeGenerator.MazeDifficulty.Hard:
-                baseInterval = 7f;
-                minimumInterval = 4f;
-                break;
+                return 4;
             default:
                 throw new ArgumentOutOfRangeException();
         }
-
-        return Mathf.Max(minimumInterval, baseInterval - (currentLevel - 1) * 0.15f);
     }
 
     private float GetRotationSpeed()
@@ -860,6 +1294,20 @@ internal sealed class GameManager : MonoBehaviour
         return defaultCameraRotation.eulerAngles.z;
     }
 
+    private float GetBaseMazeComplexityMultiplier()
+    {
+        switch (currentMazeMode)
+        {
+            case MazeMode.Rotating:
+            case MazeMode.Shifting:
+                return 0.9f;
+            case MazeMode.Mixed:
+                return 0.75f;
+            default:
+                return 1f;
+        }
+    }
+
     private void ResetCameraRotation()
     {
         if (gameplayCamera != null)
@@ -870,7 +1318,7 @@ internal sealed class GameManager : MonoBehaviour
 
     private void PrepareUpcomingLevel()
     {
-        selectedDifficulty = GetDifficultyForLevel();
+        SelectRandomDifficulty();
         SelectRandomMazeMode();
         SelectMazeDimensions();
         mazeSeed = MazeGenerator.CreateLevelSeed();
@@ -900,7 +1348,7 @@ internal sealed class GameManager : MonoBehaviour
         int savedColumns = PlayerPrefs.GetInt(SaveColumnsKey, 0);
         int savedRows = PlayerPrefs.GetInt(SaveRowsKey, 0);
         if (savedDifficulty < 0 || savedDifficulty > (int)MazeGenerator.MazeDifficulty.Hard
-            || savedMode < 0 || savedMode > (int)MazeMode.Shifting
+            || savedMode < 0 || savedMode > (int)MazeMode.Mixed
             || savedColumns < 2 || savedRows < 2)
         {
             return false;
@@ -909,6 +1357,44 @@ internal sealed class GameManager : MonoBehaviour
         currentLevel = Mathf.Max(1, PlayerPrefs.GetInt(SaveLevelKey, 1));
         selectedDifficulty = (MazeGenerator.MazeDifficulty)savedDifficulty;
         currentMazeMode = (MazeMode)savedMode;
+        int savedMechanics = PlayerPrefs.GetInt(SaveMixedMechanicsKey, -1);
+        MazeMechanic savedMechanicMask = (MazeMechanic)savedMechanics;
+        bool hasValidMixedCombination = savedMechanicMask == (MazeMechanic.Timed
+                | MazeMechanic.Rotating)
+            || savedMechanicMask == (MazeMechanic.Timed | MazeMechanic.Shifting)
+            || savedMechanicMask == (MazeMechanic.Rotating | MazeMechanic.Shifting)
+            || savedMechanicMask == (MazeMechanic.Timed
+                | MazeMechanic.Rotating
+                | MazeMechanic.Shifting);
+        if (currentMazeMode == MazeMode.Mixed
+            && hasValidMixedCombination)
+        {
+            activeMechanics = savedMechanicMask;
+        }
+        else
+        {
+            SelectActiveMechanicsForMode();
+        }
+        int savedPreviousDifficulty = PlayerPrefs.GetInt(
+            SavePreviousDifficultyKey,
+            savedDifficulty);
+        previousDifficulty = savedPreviousDifficulty >= 0
+            && savedPreviousDifficulty <= (int)MazeGenerator.MazeDifficulty.Hard
+                ? (MazeGenerator.MazeDifficulty)savedPreviousDifficulty
+                : selectedDifficulty;
+        consecutiveDifficultyCount = currentLevel <= 5
+            ? 0
+            : Mathf.Clamp(PlayerPrefs.GetInt(SaveDifficultyStreakKey, 1), 1, 2);
+
+        int savedPreviousMode = PlayerPrefs.GetInt(SavePreviousModeKey, savedMode);
+        previousMazeMode = savedPreviousMode >= 0
+            && savedPreviousMode <= (int)MazeMode.Mixed
+                ? (MazeMode)savedPreviousMode
+                : currentMazeMode;
+        consecutiveModeCount = Mathf.Clamp(
+            PlayerPrefs.GetInt(SaveModeStreakKey, 1),
+            1,
+            2);
         mazeColumns = savedColumns;
         mazeRows = savedRows;
         mazeSeed = PlayerPrefs.GetInt(SaveSeedKey, MazeGenerator.CreateLevelSeed());
@@ -921,6 +1407,7 @@ internal sealed class GameManager : MonoBehaviour
         if (testMazeMode != MazeModeTestOverride.Random)
         {
             currentMazeMode = (MazeMode)(testMazeMode - 1);
+            SelectActiveMechanicsForMode();
         }
     }
 
@@ -939,6 +1426,29 @@ internal sealed class GameManager : MonoBehaviour
         PlayerPrefs.SetInt(SaveRowsKey, mazeRows);
         PlayerPrefs.SetInt(SaveSeedKey, mazeSeed);
         PlayerPrefs.SetString(SaveWallsKey, savedWallLayout ?? string.Empty);
+        PlayerPrefs.SetInt(SavePreviousDifficultyKey, (int)previousDifficulty);
+        PlayerPrefs.SetInt(SaveDifficultyStreakKey, consecutiveDifficultyCount);
+        PlayerPrefs.SetInt(SavePreviousModeKey, (int)previousMazeMode);
+        PlayerPrefs.SetInt(SaveModeStreakKey, consecutiveModeCount);
+        PlayerPrefs.SetInt(SaveMixedMechanicsKey, (int)activeMechanics);
+        PlayerPrefs.Save();
+    }
+
+    private static void ClearSavedProgress()
+    {
+        PlayerPrefs.DeleteKey(SaveVersionKey);
+        PlayerPrefs.DeleteKey(SaveLevelKey);
+        PlayerPrefs.DeleteKey(SaveDifficultyKey);
+        PlayerPrefs.DeleteKey(SaveModeKey);
+        PlayerPrefs.DeleteKey(SaveColumnsKey);
+        PlayerPrefs.DeleteKey(SaveRowsKey);
+        PlayerPrefs.DeleteKey(SaveSeedKey);
+        PlayerPrefs.DeleteKey(SaveWallsKey);
+        PlayerPrefs.DeleteKey(SavePreviousDifficultyKey);
+        PlayerPrefs.DeleteKey(SaveDifficultyStreakKey);
+        PlayerPrefs.DeleteKey(SavePreviousModeKey);
+        PlayerPrefs.DeleteKey(SaveModeStreakKey);
+        PlayerPrefs.DeleteKey(SaveMixedMechanicsKey);
         PlayerPrefs.Save();
     }
 
@@ -958,66 +1468,115 @@ internal sealed class GameManager : MonoBehaviour
         }
     }
 
-    private MazeGenerator.MazeDifficulty GetDifficultyForLevel()
+    private void SelectRandomDifficulty()
     {
         if (currentLevel <= 5)
         {
-            return MazeGenerator.MazeDifficulty.Easy;
+            selectedDifficulty = MazeGenerator.MazeDifficulty.Easy;
+            return;
         }
 
-        int difficultyIndex = (currentLevel - 6) % 3;
-        return (MazeGenerator.MazeDifficulty)difficultyIndex;
+        MazeGenerator.MazeDifficulty rolledDifficulty;
+        int attempts = 0;
+        do
+        {
+            float roll = UnityEngine.Random.Range(0f, 100f);
+            rolledDifficulty = roll < 30f
+                ? MazeGenerator.MazeDifficulty.Easy
+                : roll < 70f
+                    ? MazeGenerator.MazeDifficulty.Medium
+                    : MazeGenerator.MazeDifficulty.Hard;
+            attempts++;
+        }
+        while (consecutiveDifficultyCount >= 2
+            && rolledDifficulty == previousDifficulty
+            && attempts < 12);
+
+        if (consecutiveDifficultyCount >= 2
+            && rolledDifficulty == previousDifficulty)
+        {
+            int offset = UnityEngine.Random.Range(1, 3);
+            rolledDifficulty = (MazeGenerator.MazeDifficulty)(
+                ((int)previousDifficulty + offset) % 3);
+        }
+
+        if (rolledDifficulty == previousDifficulty)
+        {
+            consecutiveDifficultyCount++;
+        }
+        else
+        {
+            previousDifficulty = rolledDifficulty;
+            consecutiveDifficultyCount = 1;
+        }
+
+        selectedDifficulty = rolledDifficulty;
     }
 
     private void SelectMazeDimensions()
     {
         int minimumSize;
         int maximumSize;
+        float upperSizeBias;
 
         if (currentLevel <= 5)
         {
             int growingSize = 5 + currentLevel;
             minimumSize = Mathf.Max(5, growingSize - 1);
             maximumSize = growingSize + 1;
+            upperSizeBias = 0f;
         }
         else
         {
-            switch (selectedDifficulty)
-            {
-                case MazeGenerator.MazeDifficulty.Easy:
-                    minimumSize = 9;
-                    maximumSize = 12;
-                    break;
-                case MazeGenerator.MazeDifficulty.Medium:
-                    minimumSize = 13;
-                    maximumSize = 17;
-                    break;
-                case MazeGenerator.MazeDifficulty.Hard:
-                    minimumSize = 18;
-                    maximumSize = 22;
-                    break;
-                default:
-                    throw new ArgumentOutOfRangeException();
-            }
+            int levelSize = GetLevelBasedMazeSize(currentLevel);
+            minimumSize = Mathf.Max(9, levelSize - 1);
+            maximumSize = Mathf.Min(27, levelSize + 1);
+            upperSizeBias = 0.5f;
         }
 
         previousMazeColumns = mazeColumns;
         previousMazeRows = mazeRows;
 
-        float laterLevelBias = currentLevel <= 5
-            ? 0f
-            : Mathf.Clamp01((currentLevel - 6) / 30f);
         int attempts = 0;
 
         do
         {
-            mazeColumns = RollDimension(minimumSize, maximumSize, laterLevelBias);
-            mazeRows = RollDimension(minimumSize, maximumSize, laterLevelBias);
+            mazeColumns = RollDimension(minimumSize, maximumSize, upperSizeBias);
+            mazeRows = RollDimension(minimumSize, maximumSize, upperSizeBias);
             attempts++;
         }
         while (mazeColumns == previousMazeColumns
             && mazeRows == previousMazeRows
             && attempts < 12);
+    }
+
+    private static int GetLevelBasedMazeSize(int level)
+    {
+        if (level <= 30)
+        {
+            return Mathf.RoundToInt(Mathf.Lerp(
+                10f,
+                19f,
+                Mathf.InverseLerp(6f, 30f, level)));
+        }
+
+        if (level <= 60)
+        {
+            return Mathf.RoundToInt(Mathf.Lerp(
+                19f,
+                23f,
+                Mathf.InverseLerp(30f, 60f, level)));
+        }
+
+        if (level <= 90)
+        {
+            return Mathf.RoundToInt(Mathf.Lerp(
+                23f,
+                26f,
+                Mathf.InverseLerp(60f, 90f, level)));
+        }
+
+        return 26;
     }
 
     private static int RollDimension(int minimumSize, int maximumSize, float upperSizeBias)
@@ -1078,13 +1637,14 @@ internal sealed class GameManager : MonoBehaviour
 
         if (gameplayMazeTypeText != null)
         {
-            gameplayMazeTypeText.text = $"{currentMazeMode} Maze";
+            gameplayMazeTypeText.text = GetMazeModeLabel();
         }
     }
 
     private void OnDestroy()
     {
         StopWinAnimation();
+        StopLoseAnimation();
         SaveProgress();
         ResetCameraRotation();
         Time.timeScale = 1f;
