@@ -2659,7 +2659,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!212 &1111745065
 SpriteRenderer:
   serializedVersion: 2
@@ -2709,12 +2709,12 @@ SpriteRenderer:
   m_SortingLayer: 0
   m_SortingOrder: 3
   m_MaskInteraction: 0
-  m_Sprite: {fileID: 21300000, guid: b9e031f7d1c09c24d94d27c2df831b11, type: 3}
+  m_Sprite: {fileID: 21300000, guid: 3b2473c63a0466d4a8d16c3a4fb7c2c6, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
   m_FlipX: 0
   m_FlipY: 0
   m_DrawMode: 0
-  m_Size: {x: 0.7, y: 0.7}
+  m_Size: {x: 2.8, y: 2.8}
   m_AdaptiveModeThreshold: 0.5
   m_SpriteTileMode: 0
   m_WasSpriteAssigned: 1
@@ -2729,7 +2729,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalScale: {x: 0.5, y: 0.5, z: 0.5}
   m_ConstrainProportionsScale: 1
   m_Children: []
   m_Father: {fileID: 0}
@@ -4410,13 +4410,19 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GameManager
   testMazeMode: 0
-  resetSavedProgress: 0
-  startAtLevel: 150
+  resetSavedProgress: 1
+  startAtLevel: 0
   mazeGenerator: {fileID: 835156200}
   playerMovement: {fileID: 58606804}
   mazeWorld: {fileID: 835156198}
   playerWorld: {fileID: 58606801}
   endpointWorld: {fileID: 1111745064}
+  playerEntranceSpeed: 4
+  playerTransitionSpeed: 7.5
+  entranceStartDelay: 0.2
+  rotatingEntranceExtraViewportDistance: 0.45
+  endpointFadeDuration: 0.4
+  offscreenViewportMargin: 0.08
   mainMenuCanvas: {fileID: 2364163}
   gameCanvas: {fileID: 1422178337}
   winCanvas: {fileID: 579063916}
@@ -4431,6 +4437,11 @@ MonoBehaviour:
   gameplayTimerText: {fileID: 471677117}
   gameplayDifficultyText: {fileID: 67982385}
   gameplayCamera: {fileID: 519420031}
+  urgentTimerScale: 1.18
+  urgentTimerThreshold: 30
+  urgentTimerSlowPulseSpeed: 0.9
+  urgentTimerFastPulseSpeed: 1.8
+  urgentTimerColor: {r: 0.9, g: 0.08, b: 0.04, a: 1}
   winStar: {fileID: 963234400}
   winTitle: {fileID: 689576762}
   winMessage: {fileID: 627235323}
