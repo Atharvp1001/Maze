@@ -25,6 +25,7 @@ internal sealed partial class GameManager
             && mixedEventCooldownPoints <= 0)
         {
             targetCameraAngle += UnityEngine.Random.value < 0.5f ? -90f : 90f;
+            AudioManager.Instance?.PlayMazeChange();
             pointsSinceRotation = 0;
             if (currentMazeMode == MazeMode.Mixed)
             {
@@ -124,6 +125,7 @@ internal sealed partial class GameManager
                 && !playerMovement.IsCurrentlyMoving)
             {
                 mazeGenerator.CompletePreparedWallShift();
+                AudioManager.Instance?.PlayMazeChange();
             }
             else
             {

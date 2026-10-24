@@ -47,6 +47,7 @@ internal sealed partial class PlayerMovement
     private void BeginMovement(int pointIndex)
     {
         ClearPointHover();
+        AudioManager.Instance?.PlayMove();
         movementStartPointIndex = currentPointIndex;
         destinationPointIndex = pointIndex;
         backtrackTargetTrailIndex = FindBacktrackJunction(pointIndex);

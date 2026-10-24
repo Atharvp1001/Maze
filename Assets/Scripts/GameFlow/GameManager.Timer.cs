@@ -31,6 +31,7 @@ internal sealed partial class GameManager
     private void RestartAfterTimeout()
     {
         levelIsRunning = false;
+        AudioManager.Instance?.PlayTimeUp();
         ResetTimerUrgency();
         ResetCameraRotation();
         ShowLoseScreen();

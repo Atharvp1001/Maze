@@ -256,27 +256,27 @@ internal sealed partial class GameManager : MonoBehaviour
     {
         if (playButton != null)
         {
-            playButton.onClick.AddListener(Play);
+            playButton.onClick.AddListener(HandlePlayButtonClicked);
         }
 
         if (backButton != null)
         {
-            backButton.onClick.AddListener(ShowMainMenu);
+            backButton.onClick.AddListener(HandleBackButtonClicked);
         }
 
         if (restartButton != null)
         {
-            restartButton.onClick.AddListener(RestartLevel);
+            restartButton.onClick.AddListener(HandleRestartButtonClicked);
         }
 
         if (loseBackButton != null)
         {
-            loseBackButton.onClick.AddListener(ReturnToMenuFromLoseScreen);
+            loseBackButton.onClick.AddListener(HandleLoseBackButtonClicked);
         }
 
         if (loseRetryButton != null)
         {
-            loseRetryButton.onClick.AddListener(RetryFromLoseScreen);
+            loseRetryButton.onClick.AddListener(HandleLoseRetryButtonClicked);
         }
 
         if (playerMovement != null)
@@ -297,27 +297,27 @@ internal sealed partial class GameManager : MonoBehaviour
 
         if (playButton != null)
         {
-            playButton.onClick.RemoveListener(Play);
+            playButton.onClick.RemoveListener(HandlePlayButtonClicked);
         }
 
         if (backButton != null)
         {
-            backButton.onClick.RemoveListener(ShowMainMenu);
+            backButton.onClick.RemoveListener(HandleBackButtonClicked);
         }
 
         if (restartButton != null)
         {
-            restartButton.onClick.RemoveListener(RestartLevel);
+            restartButton.onClick.RemoveListener(HandleRestartButtonClicked);
         }
 
         if (loseBackButton != null)
         {
-            loseBackButton.onClick.RemoveListener(ReturnToMenuFromLoseScreen);
+            loseBackButton.onClick.RemoveListener(HandleLoseBackButtonClicked);
         }
 
         if (loseRetryButton != null)
         {
-            loseRetryButton.onClick.RemoveListener(RetryFromLoseScreen);
+            loseRetryButton.onClick.RemoveListener(HandleLoseRetryButtonClicked);
         }
 
         if (playerMovement != null)
@@ -330,6 +330,36 @@ internal sealed partial class GameManager : MonoBehaviour
         {
             mazeGenerator.WallLayoutChanged -= HandleWallLayoutChanged;
         }
+    }
+
+    private void HandlePlayButtonClicked()
+    {
+        AudioManager.Instance?.PlayButton();
+        Play();
+    }
+
+    private void HandleBackButtonClicked()
+    {
+        AudioManager.Instance?.PlayButton();
+        ShowMainMenu();
+    }
+
+    private void HandleRestartButtonClicked()
+    {
+        AudioManager.Instance?.PlayButton();
+        RestartLevel();
+    }
+
+    private void HandleLoseBackButtonClicked()
+    {
+        AudioManager.Instance?.PlayButton();
+        ReturnToMenuFromLoseScreen();
+    }
+
+    private void HandleLoseRetryButtonClicked()
+    {
+        AudioManager.Instance?.PlayButton();
+        RetryFromLoseScreen();
     }
 
     private void Play()
@@ -446,6 +476,7 @@ internal sealed partial class GameManager : MonoBehaviour
             : Mathf.Max(0f, timerValue);
 
         levelIsRunning = false;
+        AudioManager.Instance?.PlayLevelComplete();
         ResetTimerUrgency();
         isAdvancingLevel = true;
         hasActiveLevel = false;
