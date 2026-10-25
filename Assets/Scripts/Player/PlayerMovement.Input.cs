@@ -34,23 +34,33 @@ internal sealed partial class PlayerMovement
             new Vector3(pointerPosition.x, pointerPosition.y, cameraDistance));
 
         float selectionRadius = mazeGenerator.CellSize * selectionRadiusInCells;
-        if (mazeGenerator.TryGetReachablePoint(
+        if (TryGetTrailPoint(
+                worldPosition,
+                selectionRadius,
+                out int trailPointIndex,
+                out int trailIndex))
+        {
+            BeginMovement(trailPointIndex, trailIndex);
+        }
+        else if (mazeGenerator.TryGetReachablePoint(
                 worldPosition,
                 currentPointIndex,
                 selectionRadius,
                 out int clickedPointIndex))
         {
-            BeginMovement(clickedPointIndex);
+            BeginMovement(clickedPointIndex, -1);
         }
     }
 
-    private void BeginMovement(int pointIndex)
+    private void BeginMovement(int pointIndex, int selectedTrailIndex)
     {
         ClearPointHover();
         AudioManager.Instance?.PlayMove();
         movementStartPointIndex = currentPointIndex;
         destinationPointIndex = pointIndex;
-        backtrackTargetTrailIndex = FindBacktrackJunction(pointIndex);
+        backtrackTargetTrailIndex = selectedTrailIndex >= 0
+            ? selectedTrailIndex
+            : FindBacktrackJunction(pointIndex);
         isBacktracking = backtrackTargetTrailIndex >= 0;
         isMoving = true;
 
@@ -97,13 +107,25 @@ internal sealed partial class PlayerMovement
             new Vector3(pointerPosition.x, pointerPosition.y, cameraDistance));
         float selectionRadius = mazeGenerator.CellSize * selectionRadiusInCells;
 
-        int nextHoveredPoint = mazeGenerator.TryGetReachablePoint(
-            worldPosition,
-            currentPointIndex,
-            selectionRadius,
-            out int pointIndex)
-            ? pointIndex
-            : -1;
+        int nextHoveredPoint;
+        if (TryGetTrailPoint(
+                worldPosition,
+                selectionRadius,
+                out int trailPointIndex,
+                out _))
+        {
+            nextHoveredPoint = trailPointIndex;
+        }
+        else
+        {
+            nextHoveredPoint = mazeGenerator.TryGetReachablePoint(
+                worldPosition,
+                currentPointIndex,
+                selectionRadius,
+                out int pointIndex)
+                ? pointIndex
+                : -1;
+        }
 
         if (nextHoveredPoint == hoveredPointIndex)
         {

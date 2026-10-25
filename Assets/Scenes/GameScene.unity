@@ -2223,11 +2223,11 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::AudioManager
   sfxSource: {fileID: 0}
-  buttonClickClip: {fileID: 8300000, guid: 92c8ea9eebcd94148a495930566d2a45, type: 3}
+  buttonClickClip: {fileID: 8300000, guid: cabb9684cf6cd9645b57b52ca45ad8d8, type: 3}
   moveClip: {fileID: 0}
   mazeChangeClip: {fileID: 0}
   levelCompleteClip: {fileID: 0}
-  timeUpClip: {fileID: 0}
+  timeUpClip: {fileID: 8300000, guid: 90ad74c06788fc043bee832a629e22ba, type: 3}
 --- !u!4 &796481724
 Transform:
   m_ObjectHideFlags: 0

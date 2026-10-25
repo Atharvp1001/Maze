@@ -10,7 +10,8 @@ internal sealed partial class MazeGenerator
     internal bool PrepareWallShift(
         Vector2Int playerCell,
         IReadOnlyList<Vector2Int> protectedTrail,
-        int exchangeCount)
+        int exchangeCount,
+        int targetedExchangeCount)
     {
         if (!hasCurrentLevel || walls == null || !IsInside(playerCell))
         {
@@ -19,42 +20,30 @@ internal sealed partial class MazeGenerator
 
         CancelPreparedWallShift();
         exchangeCount = Mathf.Max(1, exchangeCount);
+        targetedExchangeCount = Mathf.Clamp(
+            targetedExchangeCount,
+            0,
+            exchangeCount);
 
         for (int exchangeIndex = 0; exchangeIndex < exchangeCount; exchangeIndex++)
         {
             CollectShiftCandidates(protectedTrail);
-            int maximumAttempts = Mathf.Min(
-                512,
-                shiftOpenEdges.Count * shiftClosedEdges.Count);
-            bool exchangePrepared = false;
-
-            for (int attempt = 0; attempt < maximumAttempts; attempt++)
+            bool shouldTargetRoute = exchangeIndex < targetedExchangeCount;
+            if (shouldTargetRoute)
             {
-                LoopCandidate edgeToOpen = shiftClosedEdges[
-                    UnityEngine.Random.Range(0, shiftClosedEdges.Count)];
-                LoopCandidate edgeToClose = shiftOpenEdges[
-                    UnityEngine.Random.Range(0, shiftOpenEdges.Count)];
+                CollectTargetCloseEdges(playerCell);
+            }
 
-                if (!EdgesShareCell(edgeToOpen, edgeToClose)
-                    || IsAlreadyPrepared(edgeToOpen)
-                    || IsAlreadyPrepared(edgeToClose))
-                {
-                    continue;
-                }
+            bool exchangePrepared = shouldTargetRoute
+                && TryPrepareWallExchange(playerCell, shiftTargetCloseEdges);
 
-                SetEdgeOpen(edgeToOpen, true);
-                SetEdgeOpen(edgeToClose, false);
-                if (!IsEntireMazeReachable(playerCell))
-                {
-                    SetEdgeOpen(edgeToClose, true);
-                    SetEdgeOpen(edgeToOpen, false);
-                    continue;
-                }
-
-                preparedEdgesToOpen.Add(edgeToOpen);
-                preparedEdgesToClose.Add(edgeToClose);
-                exchangePrepared = true;
-                break;
+            // If a useful route change is not available, keep the requested
+            // amount of maze activity by falling back to a safe random pair.
+            if (!exchangePrepared)
+            {
+                exchangePrepared = TryPrepareWallExchange(
+                    playerCell,
+                    shiftOpenEdges);
             }
 
             if (!exchangePrepared)
@@ -77,6 +66,63 @@ internal sealed partial class MazeGenerator
 
         hasPreparedShift = true;
         preparedPassageIsOpen = false;
+        ShowPreparedShiftWarnings();
+        return true;
+    }
+
+    internal bool ValidatePreparedWallShift(
+        Vector2Int playerCell,
+        IReadOnlyList<Vector2Int> protectedTrail)
+    {
+        if (!hasPreparedShift || preparedPassageIsOpen
+            || !IsInside(playerCell))
+        {
+            return false;
+        }
+
+        List<LoopCandidate> candidateOpenEdges = new List<LoopCandidate>(
+            preparedEdgesToOpen);
+        List<LoopCandidate> candidateCloseEdges = new List<LoopCandidate>(
+            preparedEdgesToClose);
+        preparedEdgesToOpen.Clear();
+        preparedEdgesToClose.Clear();
+
+        for (int index = 0; index < candidateOpenEdges.Count; index++)
+        {
+            LoopCandidate edgeToOpen = candidateOpenEdges[index];
+            LoopCandidate edgeToClose = candidateCloseEdges[index];
+            if (IsProtectedTrailEdge(edgeToClose, protectedTrail))
+            {
+                continue;
+            }
+
+            SetEdgeOpen(edgeToOpen, true);
+            SetEdgeOpen(edgeToClose, false);
+            if (!IsEntireMazeReachable(playerCell))
+            {
+                SetEdgeOpen(edgeToClose, true);
+                SetEdgeOpen(edgeToOpen, false);
+                continue;
+            }
+
+            preparedEdgesToOpen.Add(edgeToOpen);
+            preparedEdgesToClose.Add(edgeToClose);
+        }
+
+        // Validation is cumulative. Restore the live layout until the warning
+        // finishes, just as preparation does.
+        for (int index = preparedEdgesToOpen.Count - 1; index >= 0; index--)
+        {
+            SetEdgeOpen(preparedEdgesToClose[index], true);
+            SetEdgeOpen(preparedEdgesToOpen[index], false);
+        }
+
+        if (preparedEdgesToOpen.Count == 0)
+        {
+            ClearPreparedShift();
+            return false;
+        }
+
         ShowPreparedShiftWarnings();
         return true;
     }
@@ -196,6 +242,134 @@ internal sealed partial class MazeGenerator
                 }
             }
         }
+    }
+
+    private bool TryPrepareWallExchange(
+        Vector2Int playerCell,
+        IReadOnlyList<LoopCandidate> closeCandidates)
+    {
+        if (shiftClosedEdges.Count == 0 || closeCandidates.Count == 0)
+        {
+            return false;
+        }
+
+        int maximumAttempts = Mathf.Min(
+            512,
+            shiftClosedEdges.Count * closeCandidates.Count);
+        for (int attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            LoopCandidate edgeToOpen = shiftClosedEdges[
+                UnityEngine.Random.Range(0, shiftClosedEdges.Count)];
+            LoopCandidate edgeToClose = closeCandidates[
+                UnityEngine.Random.Range(0, closeCandidates.Count)];
+
+            if (!EdgesShareCell(edgeToOpen, edgeToClose)
+                || IsAlreadyPrepared(edgeToOpen)
+                || IsAlreadyPrepared(edgeToClose))
+            {
+                continue;
+            }
+
+            SetEdgeOpen(edgeToOpen, true);
+            SetEdgeOpen(edgeToClose, false);
+            if (!IsEntireMazeReachable(playerCell))
+            {
+                SetEdgeOpen(edgeToClose, true);
+                SetEdgeOpen(edgeToOpen, false);
+                continue;
+            }
+
+            preparedEdgesToOpen.Add(edgeToOpen);
+            preparedEdgesToClose.Add(edgeToClose);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void CollectTargetCloseEdges(Vector2Int playerCell)
+    {
+        shiftRouteEdges.Clear();
+        shiftTargetCloseEdges.Clear();
+        Vector2Int exitCell = new Vector2Int(columns - 1, rows - 1);
+        if (playerCell == exitCell)
+        {
+            return;
+        }
+
+        Array.Clear(visited, 0, visited.Length);
+        int queueStart = 0;
+        int queueEnd = 1;
+        activeCells[0] = playerCell;
+        visited[playerCell.x, playerCell.y] = true;
+        pathParents[playerCell.x, playerCell.y] = new Vector2Int(-1, -1);
+
+        while (queueStart < queueEnd && !visited[exitCell.x, exitCell.y])
+        {
+            Vector2Int cell = activeCells[queueStart++];
+            foreach (Vector2Int direction in CardinalDirections)
+            {
+                Vector2Int neighbour = cell + direction;
+                if (!IsInside(neighbour)
+                    || visited[neighbour.x, neighbour.y]
+                    || !CanMove(cell, direction))
+                {
+                    continue;
+                }
+
+                visited[neighbour.x, neighbour.y] = true;
+                pathParents[neighbour.x, neighbour.y] = cell;
+                activeCells[queueEnd++] = neighbour;
+            }
+        }
+
+        if (!visited[exitCell.x, exitCell.y])
+        {
+            return;
+        }
+
+        Vector2Int routeCell = exitCell;
+        while (routeCell != playerCell)
+        {
+            Vector2Int parentCell = pathParents[routeCell.x, routeCell.y];
+            shiftRouteEdges.Add(CreateEdgeCandidate(parentCell, routeCell));
+            routeCell = parentCell;
+        }
+
+        foreach (LoopCandidate openEdge in shiftOpenEdges)
+        {
+            foreach (LoopCandidate routeEdge in shiftRouteEdges)
+            {
+                if (EdgesMatch(openEdge, routeEdge))
+                {
+                    shiftTargetCloseEdges.Add(openEdge);
+                    break;
+                }
+            }
+        }
+    }
+
+    private static LoopCandidate CreateEdgeCandidate(
+        Vector2Int firstCell,
+        Vector2Int secondCell)
+    {
+        Vector2Int direction = secondCell - firstCell;
+        if (direction == Vector2Int.up)
+        {
+            return new LoopCandidate(firstCell, secondCell, Wall.North, Wall.South);
+        }
+
+        if (direction == Vector2Int.right)
+        {
+            return new LoopCandidate(firstCell, secondCell, Wall.East, Wall.West);
+        }
+
+        if (direction == Vector2Int.down)
+        {
+            return new LoopCandidate(firstCell, secondCell, Wall.South, Wall.North);
+        }
+
+        return new LoopCandidate(firstCell, secondCell, Wall.West, Wall.East);
     }
 
     private void AddShiftCandidate(

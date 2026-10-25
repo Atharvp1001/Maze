@@ -95,6 +95,57 @@ internal sealed partial class PlayerMovement : MonoBehaviour
         }
     }
 
+    internal void CopyShiftProtectedCells(List<Vector2Int> destination)
+    {
+        CopyTrailCells(destination);
+        if (!isMoving || movementStartPointIndex < 0 || movementCellCount <= 0)
+        {
+            return;
+        }
+
+        Vector2Int startCell = mazeGenerator.GetNavigationPoint(
+            movementStartPointIndex).Cell;
+        for (int step = 1; step <= movementCellCount; step++)
+        {
+            Vector2Int protectedCell = startCell + movementCellDirection * step;
+            if (destination.Count == 0
+                || destination[destination.Count - 1] != protectedCell)
+            {
+                destination.Add(protectedCell);
+            }
+        }
+    }
+
+    private bool TryGetTrailPoint(
+        Vector3 worldPosition,
+        float maximumWorldDistance,
+        out int pointIndex,
+        out int trailIndex)
+    {
+        pointIndex = -1;
+        trailIndex = -1;
+        float closestDistanceSquared = maximumWorldDistance * maximumWorldDistance;
+
+        // The final item is the player's current point, so only earlier trail
+        // points are valid backtracking destinations.
+        for (int index = trailPositions.Count - 2; index >= 0; index--)
+        {
+            Vector2 delta = (Vector2)(trailPositions[index] - worldPosition);
+            float distanceSquared = delta.sqrMagnitude;
+            if (distanceSquared > closestDistanceSquared
+                || (pointIndex >= 0 && distanceSquared >= closestDistanceSquared))
+            {
+                continue;
+            }
+
+            closestDistanceSquared = distanceSquared;
+            pointIndex = trailPointIndices[index];
+            trailIndex = index;
+        }
+
+        return trailIndex >= 0;
+    }
+
     internal event Action LevelCompleted;
     internal event Action<int> PointsTravelled;
 

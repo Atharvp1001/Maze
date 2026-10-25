@@ -103,6 +103,8 @@ internal sealed partial class MazeGenerator : MonoBehaviour
     private readonly List<LoopCandidate> loopCandidates = new List<LoopCandidate>(256);
     private readonly List<LoopCandidate> shiftOpenEdges = new List<LoopCandidate>(256);
     private readonly List<LoopCandidate> shiftClosedEdges = new List<LoopCandidate>(256);
+    private readonly List<LoopCandidate> shiftRouteEdges = new List<LoopCandidate>(256);
+    private readonly List<LoopCandidate> shiftTargetCloseEdges = new List<LoopCandidate>(64);
     private readonly List<LoopCandidate> preparedEdgesToOpen = new List<LoopCandidate>(8);
     private readonly List<LoopCandidate> preparedEdgesToClose = new List<LoopCandidate>(8);
     private readonly List<LineRenderer> shiftOpenWarningLines = new List<LineRenderer>(8);

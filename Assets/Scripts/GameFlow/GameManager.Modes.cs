@@ -70,6 +70,7 @@ internal sealed partial class GameManager
         Color originalColor = gameplayMazeTypeText != null
             ? gameplayMazeTypeText.color
             : Color.white;
+        bool shouldRetryShift = false;
 
         bool shiftPrepared = false;
         if (playerMovement.TryGetCurrentCell(out Vector2Int warningPlayerCell))
@@ -78,7 +79,8 @@ internal sealed partial class GameManager
             shiftPrepared = mazeGenerator.PrepareWallShift(
                 warningPlayerCell,
                 protectedTrailCells,
-                GetWallExchangeCount());
+                GetWallExchangeCount(),
+                GetTargetedWallExchangeCount());
         }
 
         if (!shiftPrepared)
@@ -114,22 +116,35 @@ internal sealed partial class GameManager
             yield return null;
         }
 
-        if (levelIsRunning && HasMechanic(MazeMechanic.Shifting)
-            && !playerMovement.IsCurrentlyMoving)
+        if (levelIsRunning && HasMechanic(MazeMechanic.Shifting))
         {
             playerMovement.SetInputLocked(true);
-            mazeGenerator.OpenPreparedShiftPassage();
-            yield return new WaitForSeconds(passageOpenDelay);
+            playerMovement.CopyShiftProtectedCells(protectedTrailCells);
+            bool hasSafeShift = playerMovement.TryGetCurrentCell(
+                    out Vector2Int currentPlayerCell)
+                && mazeGenerator.ValidatePreparedWallShift(
+                    currentPlayerCell,
+                    protectedTrailCells);
 
-            if (levelIsRunning && HasMechanic(MazeMechanic.Shifting)
-                && !playerMovement.IsCurrentlyMoving)
+            if (hasSafeShift)
             {
-                mazeGenerator.CompletePreparedWallShift();
-                AudioManager.Instance?.PlayMazeChange();
+                mazeGenerator.OpenPreparedShiftPassage();
+                yield return new WaitForSeconds(passageOpenDelay);
+
+                if (levelIsRunning && HasMechanic(MazeMechanic.Shifting))
+                {
+                    mazeGenerator.CompletePreparedWallShift();
+                    AudioManager.Instance?.PlayMazeChange();
+                }
+                else
+                {
+                    mazeGenerator.CancelPreparedWallShift();
+                }
             }
             else
             {
                 mazeGenerator.CancelPreparedWallShift();
+                shouldRetryShift = true;
             }
 
             playerMovement.SetInputLocked(false);
@@ -145,7 +160,9 @@ internal sealed partial class GameManager
             gameplayMazeTypeText.text = GetMazeModeLabel();
         }
 
-        pointsSinceShift = 0;
+        pointsSinceShift = shouldRetryShift
+            ? Mathf.Max(0, GetShiftPointInterval() - 1)
+            : 0;
         shiftWarningIsRunning = false;
     }
 
@@ -331,22 +348,49 @@ internal sealed partial class GameManager
             switch (selectedDifficulty)
             {
                 case MazeGenerator.MazeDifficulty.Easy:
-                    return 2;
-                case MazeGenerator.MazeDifficulty.Medium:
                     return 3;
-                case MazeGenerator.MazeDifficulty.Hard:
+                case MazeGenerator.MazeDifficulty.Medium:
                     return 4;
+                case MazeGenerator.MazeDifficulty.Hard:
+                    return 6;
             }
         }
 
         switch (selectedDifficulty)
         {
             case MazeGenerator.MazeDifficulty.Easy:
-                return 3;
+                return 4;
             case MazeGenerator.MazeDifficulty.Medium:
-                return UnityEngine.Random.Range(4, 6);
-            case MazeGenerator.MazeDifficulty.Hard:
                 return 6;
+            case MazeGenerator.MazeDifficulty.Hard:
+                return 8;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+    }
+
+    private int GetTargetedWallExchangeCount()
+    {
+        if (currentMazeMode == MazeMode.Mixed)
+        {
+            switch (selectedDifficulty)
+            {
+                case MazeGenerator.MazeDifficulty.Easy:
+                case MazeGenerator.MazeDifficulty.Medium:
+                    return 1;
+                case MazeGenerator.MazeDifficulty.Hard:
+                    return 2;
+            }
+        }
+
+        switch (selectedDifficulty)
+        {
+            case MazeGenerator.MazeDifficulty.Easy:
+                return 1;
+            case MazeGenerator.MazeDifficulty.Medium:
+                return 2;
+            case MazeGenerator.MazeDifficulty.Hard:
+                return 3;
             default:
                 throw new ArgumentOutOfRangeException();
         }
