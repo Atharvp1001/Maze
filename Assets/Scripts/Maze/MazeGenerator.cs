@@ -121,6 +121,7 @@ internal sealed partial class MazeGenerator : MonoBehaviour
     private bool hasCurrentLevel;
     private bool hasPreparedShift;
     private bool preparedPassageIsOpen;
+    private Wall[,] preparedWallLayout;
     internal int StartPointIndex { get; private set; } = -1;
     internal int EndPointIndex { get; private set; } = -1;
     internal int SolutionLength { get; private set; }

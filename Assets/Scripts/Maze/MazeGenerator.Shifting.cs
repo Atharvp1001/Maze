@@ -64,6 +64,7 @@ internal sealed partial class MazeGenerator
             return false;
         }
 
+        preparedWallLayout = (Wall[,])walls.Clone();
         hasPreparedShift = true;
         preparedPassageIsOpen = false;
         ShowPreparedShiftWarnings();
@@ -163,43 +164,68 @@ internal sealed partial class MazeGenerator
         }
     }
 
-    internal void CompletePreparedWallShift()
+    internal bool CompletePreparedWallShift(
+        Vector2Int playerCell,
+        IReadOnlyList<Vector2Int> protectedTrail)
     {
         if (!hasPreparedShift)
         {
-            return;
+            return false;
         }
 
-        if (!preparedPassageIsOpen)
+        // Movement can continue while input is locked during the opening delay.
+        // Check the latest player/trail state before publishing any new walls.
+        if (!IsInside(playerCell))
         {
-            foreach (LoopCandidate edgeToOpen in preparedEdgesToOpen)
-            {
-                SetEdgeOpen(edgeToOpen, true);
-            }
+            CancelPreparedWallShift();
+            return false;
         }
 
         foreach (LoopCandidate edgeToClose in preparedEdgesToClose)
         {
+            if (IsProtectedTrailEdge(edgeToClose, protectedTrail))
+            {
+                CancelPreparedWallShift();
+                return false;
+            }
+        }
+
+        foreach (LoopCandidate edgeToOpen in preparedEdgesToOpen)
+        {
+            SetEdgeOpen(edgeToOpen, true);
+        }
+
+        preparedPassageIsOpen = true;
+        foreach (LoopCandidate edgeToClose in preparedEdgesToClose)
+        {
             SetEdgeOpen(edgeToClose, false);
+        }
+
+        // Validate the actual final batch, not just its earlier preview. A
+        // rejected shift restores the exact layout from before any passages opened.
+        if (!IsEntireMazeReachable(playerCell))
+        {
+            CancelPreparedWallShift();
+            return false;
         }
 
         BuildMazeMesh();
         BuildNavigationData();
         ClearPreparedShift();
         WallLayoutChanged?.Invoke(this);
+        return true;
     }
 
     internal void CancelPreparedWallShift()
     {
-        if (hasPreparedShift && preparedPassageIsOpen)
+        if (hasPreparedShift && preparedWallLayout != null)
         {
-            foreach (LoopCandidate edgeToOpen in preparedEdgesToOpen)
+            Array.Copy(preparedWallLayout, walls, preparedWallLayout.Length);
+            if (preparedPassageIsOpen)
             {
-                SetEdgeOpen(edgeToOpen, false);
+                BuildMazeMesh();
+                BuildNavigationData();
             }
-
-            BuildMazeMesh();
-            BuildNavigationData();
         }
 
         ClearPreparedShift();
@@ -581,6 +607,7 @@ internal sealed partial class MazeGenerator
     {
         hasPreparedShift = false;
         preparedPassageIsOpen = false;
+        preparedWallLayout = null;
         preparedEdgesToOpen.Clear();
         preparedEdgesToClose.Clear();
 

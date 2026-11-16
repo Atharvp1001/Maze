@@ -76,7 +76,7 @@ internal sealed partial class GameManager
         winSequence = DOTween.Sequence()
             .SetUpdate(true)
             .AppendInterval(0.12f)
-            .Append(CreatePop(winStar, winStarScale, 0.42f))
+            .Append(CreatePop(winStar, winStarScale, 0.42f, playPopupSound: true))
             .AppendInterval(0.08f)
             .Append(CreatePop(winTitle, winTitleScale, 0.32f))
             .AppendInterval(0.05f)
@@ -102,12 +102,18 @@ internal sealed partial class GameManager
     private static Sequence CreatePop(
         RectTransform target,
         Vector3 originalScale,
-        float duration)
+        float duration,
+        bool playPopupSound = false)
     {
         Sequence pop = DOTween.Sequence();
         if (target == null)
         {
             return pop;
+        }
+
+        if (playPopupSound)
+        {
+            pop.AppendCallback(() => AudioManager.Instance?.PlayPopup());
         }
 
         pop.Append(target.DOScale(originalScale * 1.18f, duration * 0.65f)

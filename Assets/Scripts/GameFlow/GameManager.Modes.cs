@@ -25,7 +25,6 @@ internal sealed partial class GameManager
             && mixedEventCooldownPoints <= 0)
         {
             targetCameraAngle += UnityEngine.Random.value < 0.5f ? -90f : 90f;
-            AudioManager.Instance?.PlayMazeChange();
             pointsSinceRotation = 0;
             if (currentMazeMode == MazeMode.Mixed)
             {
@@ -133,8 +132,17 @@ internal sealed partial class GameManager
 
                 if (levelIsRunning && HasMechanic(MazeMechanic.Shifting))
                 {
-                    mazeGenerator.CompletePreparedWallShift();
-                    AudioManager.Instance?.PlayMazeChange();
+                    playerMovement.CopyShiftProtectedCells(protectedTrailCells);
+                    bool shiftCompleted = playerMovement.TryGetCurrentCell(
+                            out Vector2Int finalPlayerCell)
+                        && mazeGenerator.CompletePreparedWallShift(
+                            finalPlayerCell,
+                            protectedTrailCells);
+                    if (!shiftCompleted)
+                    {
+                        mazeGenerator.CancelPreparedWallShift();
+                        shouldRetryShift = true;
+                    }
                 }
                 else
                 {

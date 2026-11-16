@@ -77,7 +77,8 @@ internal sealed partial class GameManager
         loseSequence = DOTween.Sequence()
             .SetUpdate(true)
             .AppendInterval(0.12f)
-            .Append(CreatePop(loseHourglass, loseHourglassScale, 0.42f))
+            .Append(CreatePop(
+                loseHourglass, loseHourglassScale, 0.42f, playPopupSound: true))
             .AppendInterval(0.08f)
             .Append(CreatePop(loseTitle, loseTitleScale, 0.32f))
             .AppendInterval(0.05f)

@@ -13,16 +13,20 @@ internal sealed class AudioManager : MonoBehaviour
 
     internal static AudioManager Instance { get; private set; }
 
-    [Header("Audio Source")]
+    [Header("Audio Sources")]
     [Tooltip("Optional. A 2D AudioSource is created automatically when this is empty.")]
     [SerializeField] private AudioSource sfxSource;
+    [SerializeField] private AudioSource timerSource;
+    [SerializeField] private AudioSource resultSource;
 
     [Header("Maze Sounds")]
     [SerializeField] private AudioClip buttonClickClip;
-    [SerializeField] private AudioClip moveClip;
-    [SerializeField] private AudioClip mazeChangeClip;
+    [SerializeField] private AudioClip clockTickingClip;
     [SerializeField] private AudioClip levelCompleteClip;
     [SerializeField] private AudioClip timeUpClip;
+    [SerializeField] private AudioClip popupClip;
+    [SerializeField] private AudioClip navigationTapClip;
+    [SerializeField, Range(0f, 1f)] private float navigationTapVolume = 0.3f;
 
     private bool sfxEnabled = true;
     private float sfxVolume = 1f;
@@ -44,15 +48,23 @@ internal sealed class AudioManager : MonoBehaviour
         sfxEnabled = PlayerPrefs.GetInt(SfxEnabledKey, 1) == 1;
         sfxVolume = Mathf.Clamp01(PlayerPrefs.GetFloat(SfxVolumeKey, 1f));
 
-        if (sfxSource == null)
+        sfxSource = ConfigureSource(sfxSource, false);
+        timerSource = ConfigureSource(timerSource, true);
+        resultSource = ConfigureSource(resultSource, false);
+        ApplySfxVolume();
+    }
+
+    private AudioSource ConfigureSource(AudioSource source, bool loop)
+    {
+        if (source == null)
         {
-            sfxSource = gameObject.AddComponent<AudioSource>();
+            source = gameObject.AddComponent<AudioSource>();
         }
 
-        sfxSource.playOnAwake = false;
-        sfxSource.loop = false;
-        sfxSource.spatialBlend = 0f;
-        ApplySfxVolume();
+        source.playOnAwake = false;
+        source.loop = loop;
+        source.spatialBlend = 0f;
+        return source;
     }
 
     internal void SetSfxEnabled(bool isEnabled)
@@ -72,10 +84,43 @@ internal sealed class AudioManager : MonoBehaviour
     }
 
     internal void PlayButton() => Play(buttonClickClip);
-    internal void PlayMove() => Play(moveClip);
-    internal void PlayMazeChange() => Play(mazeChangeClip);
-    internal void PlayLevelComplete() => Play(levelCompleteClip);
-    internal void PlayTimeUp() => Play(timeUpClip);
+    internal void PlayMove() => Play(navigationTapClip, navigationTapVolume);
+    internal void PlayLevelComplete() => PlayResult(levelCompleteClip);
+    internal void PlayTimeUp() => PlayResult(timeUpClip);
+    internal void PlayPopup() => Play(popupClip);
+
+    private void PlayResult(AudioClip clip)
+    {
+        SetClockTicking(false);
+
+        if (!sfxEnabled || clip == null || resultSource == null)
+        {
+            return;
+        }
+
+        resultSource.Stop();
+        resultSource.PlayOneShot(clip);
+    }
+
+    internal void SetClockTicking(bool active)
+    {
+        if (timerSource == null)
+        {
+            return;
+        }
+
+        if (!isActiveAndEnabled || !active || !sfxEnabled || clockTickingClip == null)
+        {
+            timerSource.Stop();
+            return;
+        }
+
+        if (!timerSource.isPlaying)
+        {
+            timerSource.clip = clockTickingClip;
+            timerSource.Play();
+        }
+    }
 
     internal void SetMuteAll(bool forceMute)
     {
@@ -88,22 +133,43 @@ internal sealed class AudioManager : MonoBehaviour
         AudioListener.volume = forceMute ? 0f : 1f;
     }
 
-    private void Play(AudioClip clip)
+    private void Play(AudioClip clip, float volumeScale = 1f)
     {
         if (!sfxEnabled || clip == null || sfxSource == null)
         {
             return;
         }
 
-        sfxSource.PlayOneShot(clip);
+        sfxSource.PlayOneShot(clip, volumeScale);
     }
 
     private void ApplySfxVolume()
     {
+        float volume = sfxEnabled ? sfxVolume : 0f;
         if (sfxSource != null)
         {
-            sfxSource.volume = sfxEnabled ? sfxVolume : 0f;
+            sfxSource.volume = volume;
         }
+
+        if (timerSource != null)
+        {
+            timerSource.volume = volume;
+        }
+
+        if (resultSource != null)
+        {
+            resultSource.volume = volume;
+        }
+
+        if (!sfxEnabled)
+        {
+            SetClockTicking(false);
+        }
+    }
+
+    private void OnDisable()
+    {
+        SetClockTicking(false);
     }
 
     private void OnApplicationFocus(bool hasFocus)

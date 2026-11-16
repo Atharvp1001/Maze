@@ -102,7 +102,7 @@ internal sealed partial class GameManager : MonoBehaviour
 
     [Header("Timer Urgency")]
     [SerializeField, Min(1f)] private float urgentTimerScale = 1.18f;
-    [SerializeField, Min(0f)] private float urgentTimerThreshold = 30f;
+    [SerializeField, Min(0f)] private float urgentTimerThreshold = 10f;
     [SerializeField, Min(0.1f)] private float urgentTimerSlowPulseSpeed = 0.9f;
     [SerializeField, Min(0.1f)] private float urgentTimerFastPulseSpeed = 1.8f;
     [SerializeField] private Color urgentTimerColor = new Color(0.9f, 0.08f, 0.04f, 1f);
@@ -237,6 +237,15 @@ internal sealed partial class GameManager : MonoBehaviour
 
     private void Update()
     {
+        AudioManager.Instance?.SetClockTicking(
+            levelIsRunning
+            && !isAdvancingLevel
+            && hasActiveLevel
+            && HasMechanic(MazeMechanic.Timed)
+            && Time.timeScale > 0f
+            && timerValue > 0f
+            && timerValue <= urgentTimerThreshold);
+
         if (!levelIsRunning || isAdvancingLevel)
         {
             return;
@@ -293,6 +302,7 @@ internal sealed partial class GameManager : MonoBehaviour
 
     private void OnDisable()
     {
+        AudioManager.Instance?.SetClockTicking(false);
         ResetTimerUrgency();
 
         if (playButton != null)
@@ -414,6 +424,7 @@ internal sealed partial class GameManager : MonoBehaviour
 
     private void ShowMainMenu()
     {
+        AudioManager.Instance?.SetClockTicking(false);
         ResetTimerUrgency();
         StopWinAnimation();
         StopLoseAnimation();
@@ -447,6 +458,7 @@ internal sealed partial class GameManager : MonoBehaviour
     {
         if (hasActiveLevel && mazeGenerator != null)
         {
+            AudioManager.Instance?.SetClockTicking(false);
             StopAllCoroutines();
             levelIsRunning = false;
             shiftWarningIsRunning = false;
